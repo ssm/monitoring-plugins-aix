@@ -1,0 +1,140 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+
+my %STATUSCODE = (
+    'UNKNOWN'  => '3',
+    'OK'       => '0',
+    'WARNING'  => '1',
+    'CRITICAL' => '2'
+);
+
+my ( $status, $idle, $usage, $debug, $help, $man );
+my $stats = {};
+my @perfdata;
+my $exitstatus;
+my $message;
+my $pagesize = 4096;
+my $crit     = 98;
+my $warn     = 92;
+
+# Counters
+my ( $memory_max_bytes, $memory_active_percentage );
+
+$status = GetOptions(
+    "debug|d", \$debug, "warn|w=s", \$warn, "crit|c=i", \$crit,
+    "help|h",  \$help,  "man|m",    \$man
+) or pod2usage(3);
+pod2usage(1) if $help;
+pod2usage( -verbose => 2 ) if $man;
+
+# Subroutines
+sub exit_simple {
+    my $exitstatus = shift;
+    my $message    = shift;
+    my @perfdata   = @_;
+
+    if (@perfdata) {
+        printf( "%s - %s|%s\n",
+            $exitstatus, $message, join( " ", @perfdata ) );
+    }
+    else {
+        printf "%s - %s\n", $exitstatus, $message;
+    }
+    exit( $STATUSCODE{$exitstatus} );
+}
+
+# Run program, exit early in case of problems.
+$ENV{'LANG'} = 'c';
+my $pid = open( my $vmstat, "-|", "/usr/bin/vmstat", "-v" );
+if ($pid) {
+    while (<$vmstat>) {
+        /(\d+) memory pages/ and do { $memory_max_bytes = $1 * $pagesize; };
+        /(\d+[.]\d+) percentage of memory used for computational pages/
+            and do { $memory_active_percentage = $1; };
+    }
+    close($vmstat) || do {
+        $message
+            = sprintf( "Unexpected exit status from vmstat: %s", $? >> 8 );
+        $exitstatus = "UNKNOWN";
+        exit_simple( $exitstatus, $message );
+        }
+}
+else {
+    $exitstatus = "UNKNOWN";
+    $message    = "Unable to execute vmstat";
+    exit_simple( $exitstatus, $message );
+}
+
+# Calculate result
+$message
+    = sprintf( "Active virtual pages at %s%%", $memory_active_percentage );
+push(
+    @perfdata,
+    sprintf(
+        "'%s'=%.2f%s;%.2f;%.2f",
+        'active', $memory_active_percentage, '%', $warn, $crit
+    )
+);
+
+if ( $memory_active_percentage >= $crit ) {
+    $exitstatus = "CRITICAL";
+}
+elsif ( $memory_active_percentage >= $warn ) {
+    $exitstatus = "WARNING";
+}
+else {
+    $exitstatus = "OK";
+}
+
+exit_simple( $exitstatus, $message, @perfdata );
+
+__END__
+
+=head1 NAME
+
+check_aix_memory - Check CPU usage
+
+=head1 SYNOPSIS
+
+check_aix_memory [options]
+
+Options:
+ [-w <warning threshold>]
+ [-c <critical threshold>]
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-c|--critical THRESHOLD>
+
+Set critical threshold in percent.  Default is 98.
+
+=item B<-w|--warning THRESHOLD>
+
+Set critical threshold in percent.  Default is 92.
+
+=item B<-d|--debug>
+
+Debug plugin state while running.
+
+=item B<-h|--help>
+
+Print brief help message and exit.
+
+=item B<-m|--man>
+
+Print manual page and exit.
+
+=back
+
+=head1 DESCRIPTION
+
+B<check_aix_memory> will run vmstat to check active memory usage, and
+compare it to the warning and critical thresholds.
+
+=cut

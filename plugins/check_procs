@@ -1,0 +1,471 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+
+my %STATUSCODE = (
+    'UNKNOWN'  => '3',
+    'OK'       => '0',
+    'WARNING'  => '1',
+    'CRITICAL' => '2'
+);
+
+my ( $status, $idle, $usage, $verbose, $debug, $help, $man );
+my $user;
+my $comm;
+my $args;
+my $warning;
+my $critical;
+my $perfdata;
+my $exitstatus;
+my @messages;
+my @perfdata;
+
+my @processes = ();
+my @lines;
+
+Getopt::Long::Configure("no_ignore_case");
+$status = GetOptions(
+    "user|u=s"     => \$user,
+    "args|a=s"     => \$args,
+    "comm|C=s"     => \$comm,
+    "warning|w=s"  => \$warning,
+    "critical|c=s" => \$critical,
+    "debug|d"      => \$debug,
+    "verbose|v"    => \$verbose,
+    "help|h"       => \$help,
+    "man|m"        => \$man
+) or pod2usage(3);
+pod2usage(1) if $help;
+pod2usage( -verbose => 2 ) if $man;
+
+# Functions
+sub printstatus {
+    my ($arg_ref)  = @_;
+    my $exitstatus = $arg_ref->{exitstatus};
+    my $messages   = $arg_ref->{messages};
+    my $perfdata   = $arg_ref->{perfdata};
+    my @messages   = @{$messages};
+    my @perfdata   = @{$perfdata};
+
+    # First line of status
+    printf( "%s - %s", $exitstatus, shift @messages );
+    if (@perfdata) {
+        printf "|%s", join( " ", @perfdata );
+    }
+
+    # Extra status message lines, if any
+    if (@messages) {
+        printf "\n%s", join( "\n", @messages );
+    }
+    printf "\n";
+}
+
+sub check_range_format {
+    my $range = shift;
+    return (
+        $range =~ m{
+                            ^                     # beginning of string
+                            @?                    # inversion of range, if present
+                            (
+                                (~|-?\d+):        # above $1
+                            |
+                                :?(\d+)           # between 0 and $1
+                            |
+                                (~|-?\d+):(-?\d+) # between $1 and $2
+                            )
+                            $                     # end of string
+                    }x
+    );
+}
+
+sub value_within_range {
+    my ($arg_ref) = @_;
+    my $range     = $arg_ref->{range};
+    my $value     = $arg_ref->{value};
+    my $name      = $arg_ref->{name};
+    my $min;
+    my $max;
+    my $inversion;
+    my $result;
+
+    # Check parameters
+    die("[bug] Missing range") unless ( defined $range );
+    die("[bug] Missing value") unless ( defined $value );
+    die("[bug] Missing name")  unless ( defined $name );
+
+    # Check for inversion, remove "@"
+    if ( $range =~ /^@(.*)/ ) {
+        $inversion = 1;
+        $range     = $1;
+    }
+
+    # example: "10", outside { 0 .. 10 }
+    if ( $range =~ /^(\d+)$/ ) {
+        $min    = 0;
+        $max    = $1;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "10:", outside { 10 .. inf }
+    elsif ( $range =~ /^(-?\d+):$/ ) {
+        $min    = $1;
+        $result = ( $min <= $value );
+    }
+
+    # example: ~:10, outside { -inf .. 10 }
+    elsif ( $range =~ /^~:(-?\d+)$/ ) {
+        $max    = $1;
+        $result = ( $value <= $max );
+    }
+
+    # example: 1:10, -10:-1, -10:10
+    elsif ( $range =~ /^(-?\d+):(-?\d+)$/ ) {
+        $min    = $1;
+        $max    = $2;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "~:", outside { -inf .. inf }
+    # - makes little sense, but it is valid syntax
+    elsif ( $range =~ /^~:$/ ) {
+        $result = 1;
+    }
+
+    # Safety belt
+    else {
+        die(sprintf(
+                "Invalid %s range format. Can not parse %s.\n",
+                $name, $range
+            )
+        );
+    }
+
+    if ( defined($min) and defined($max) ) {
+        if ( $min > $max ) {
+            die(sprintf(
+                    "Invalid %s range value. Minimum (%s) must not be higher than maximum (%s)\n",
+                    $name, $range, $min, $max
+                )
+            );
+        }
+    }
+    $result = ( $result xor $inversion );
+    return $result;
+}
+
+# Sanity checks
+
+if ($warning) {
+    printf( "[debug] Checking --warning argument %s\n", $warning )
+        if ($debug);
+    die "Invalid range format for --warning\n"
+        unless check_range_format($warning);
+}
+if ($critical) {
+    printf( "[debug] Checking --critical argument %s\n", $critical )
+        if ($debug);
+    die "Invalid range format for --critical\n"
+        unless check_range_format($critical);
+}
+
+# Run command
+$ENV{'LANG'} = 'c';
+my $pid
+    = open( my $ps, "-|", "/usr/bin/ps", "-A", "-o", "user,pid,comm,args" );
+if ($pid) {
+    while (<$ps>) {
+        my $line = $_;
+        $line =~ s/^\s+|\s+$//g;
+        push @lines, $line;
+    }
+    close($ps) || do {
+        my $message
+            = sprintf( "Unexpected exit status from ps: %s", $? >> 8 );
+        $exitstatus = 'UNKNOWN';
+        printstatus( { exitstatus => $exitstatus, messages => ($message) } );
+        exit( $STATUSCODE{$exitstatus} );
+        }
+}
+else {
+    my $message = 'Unable to execute ps';
+    $exitstatus = 'UNKNOWN';
+    printstatus( { exitstatus => $exitstatus, messages => ($message) } );
+    exit( $STATUSCODE{$exitstatus} );
+}
+
+# Parse output
+for my $line (@lines) {
+    printf( "[debug] Parsing %s\n", $line ) if ($debug);
+    if ($line =~ m{
+          ^
+          (\S+) # user
+          \s+
+          (\d+) # pid
+          \s+
+          (\S+) # comm
+          \s+
+          (.*)  # args
+          $
+        }x
+        )
+    {
+        printf( "[debug] Matched: %s\n", $line ) if ($debug);
+
+        my $ps_user = $1;
+        my $ps_pid  = int $2;
+        my $ps_comm = $3;
+        my $ps_args = $4;
+
+        push(
+            @processes,
+            {   user => $ps_user,
+                pid  => $ps_pid,
+                comm => $ps_comm,
+                args => $ps_args,
+            }
+        );
+    }
+    else {
+        printf( "[debug] Skipping: %s\n", $line ) if ($debug);
+    }
+}
+
+# Filter
+
+if ($user) {
+    @processes = grep { $_->{user} eq $user } @processes;
+}
+if ($comm) {
+    @processes = grep { $_->{comm} eq $comm } @processes;
+}
+if ($args) {
+    @processes = grep { $_->{args} =~ $args } @processes;
+}
+
+my $process_count = scalar(@processes);
+
+if ( $critical || $warning ) {
+    if ($critical
+        && !value_within_range(
+            {   name  => 'critical',
+                range => $critical,
+                value => $process_count
+            }
+        )
+        )
+    {
+        $exitstatus = 'CRITICAL';
+        push @messages,
+            sprintf( '%s matching processes, outside critical threshold "%s"',
+            $process_count, $critical );
+    }
+    elsif (
+        $warning
+        && !value_within_range(
+            { name => 'warning', range => $warning, value => $process_count }
+        )
+        )
+    {
+        $exitstatus = 'WARNING';
+        push @messages,
+            sprintf( '%s matching processes, outside warning threshold "%s"',
+            $process_count, $warning );
+    }
+    else {
+        $exitstatus = 'OK';
+        push @messages,
+            sprintf( '%s matching processes found, within threshold',
+            $process_count );
+    }
+    push @perfdata,
+        sprintf(
+        "processes=%s;%s;%s",
+        $process_count,
+        defined($warning)  ? $warning  : '',
+        defined($critical) ? $critical : ''
+        );
+}
+elsif (@processes) {
+    $exitstatus = 'OK';
+    push @messages, sprintf( "%d matching processes found", $process_count );
+    push @perfdata, sprintf( "processes=%s", $process_count );
+}
+else {
+    $exitstatus = 'CRITICAL';
+    push @messages, "No matching processes found";
+}
+
+if ($verbose) {
+    push @messages, map { $_->{args} } @processes;
+}
+
+# The end
+printstatus(
+    {   exitstatus => $exitstatus,
+        messages   => \@messages,
+        perfdata   => \@perfdata
+    }
+);
+exit( $STATUSCODE{$exitstatus} );
+
+__END__
+
+=head1 NAME
+
+check_aix_procs - Check running processes
+
+=head1 SYNOPSIS
+
+check_aix_procs [options]
+
+Options:
+ [-C <COMMAND>]
+ [-a <REGEX>]
+ [-u <USER>]
+ [-w <THRESHOLD>]
+ [-c <THRESHOLD>]
+ [-v]
+ [-d]
+ [-h]
+ [-m]
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-u|--user USER>
+
+Look for processes owned by USER.
+
+=item B<-C|--comm PROCESS NAME>
+
+Look for processes where the PROCESS NAME matches exactly against the
+B<comm> field from the B<ps> command.
+
+Normally, this will match the executable file name for compiled
+executables, or the name of the interpreter for files run by an
+interpreter. The process name may be truncated by the OS, and changed
+by the process.
+
+=item B<-a|--args REGEX>
+
+Look for processes where the argument list matches the regular
+expression provided.
+
+This will match against the B<COMM> field from the B<ps> command.
+
+Normally, this will include the command and all command line
+arguments. The process argument list may be changed by the process as
+it runs.
+
+=item B<-c|--critical THRESHOLD>
+
+Exit with CRITICAL severity if the value matches the threshold.  See
+THRESHOLDS for values.
+
+=item B<-d|--debug>
+
+Debug plugin state while running.
+
+=item B<-v|--verbose>
+
+Add extra information about matching processes to status output.
+
+=item B<-h|--help>
+
+Print brief help message and exit.
+
+=item B<-m|--man>
+
+Print manual page and exit.
+
+=back
+
+=head1 DESCRIPTION
+
+B<check_aix_procs> will check for running processes matching the
+selection criteria.  If found, the plugin will exit with status 0
+(OK), otherwise it will exit with status 3 (CRITICAL).
+
+=head1 THRESHOLDS
+
+A threshold is a range with an alert level (either warning or
+critical).  The general format for ranges is:
+
+=over 4
+
+C<[@]start:end>
+
+=back
+
+C<start> must be lower than C<end>.
+
+C<start> and C<:> is not required if start is 0.
+
+If range is of format C<start:> and end is not specified, end is
+infinity.
+
+Negative infinity is specified as C<~>.
+
+=head2 EXAMPLE THRESHOLDS
+
+Generate alert for range if value is...
+
+=over 4
+
+=item B<10>
+
+Outside the range of C<{0 .. 10}>
+
+=item B<10:>
+
+Outside the range of C<{10 .. infinity}>
+
+=item B<~:10>
+
+Outside the range of C<{-infinity .. 10}>
+
+=item B<10:20>
+
+Outside the range of C<{10 .. 20}>
+
+=item B<@10:20>
+
+Inside the range of C<{10 .. 20}>
+
+=back
+
+=head1 EXAMPLES
+
+=over 4
+
+=item B<check_aix_procs --user someone --comm usefuld>
+
+Look for processes owned by the user C<someone> and the process name
+C<usefuld>.
+
+=item B<check_aix_procs --comm java --args com.example.thing>
+
+Look for processes where the command is C<java> and the argument list
+includes the string C<com.example.foobar>.
+
+This is a regular expression, so C<(this|that)> will match command
+line arguments containing either C<this> or C<that>.
+
+=item B<check_aix_procs --args /path/to/something -c 5:10>
+
+Look for processes where the argument list includes
+C</path/to/something>. Exit with CRITICAL status if the number of
+processes is lower than 5 and higher than 10.
+
+=back
+
+=head1 SEE ALSO
+
+L<ps/flags> (description of the B<comm> and B<args> fields used for
+matching processes).
+
+=cut

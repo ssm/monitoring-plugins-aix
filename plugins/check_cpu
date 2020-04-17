@@ -1,0 +1,138 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+
+my %STATUSCODE = (
+    'UNKNOWN'  => '3',
+    'OK'       => '0',
+    'WARNING'  => '1',
+    'CRITICAL' => '2'
+);
+
+my ( $status, $idle, $usage, $debug, $help, $man );
+my $items = { idle => 15, system => 14, user => 13 };
+my $warn  = 90;
+my $crit  = 99;
+my $count = 5;
+my $stats = {};
+my @perfdata;
+my $exitstatus;
+my $message;
+
+$status = GetOptions(
+    "debug|d", \$debug, "warn|w=s", \$warn, "crit|c=i", \$crit,
+    "help|h",  \$help,  "man|m",    \$man
+) or pod2usage(3);
+pod2usage(1) if $help;
+pod2usage( -verbose => 2 ) if $man;
+
+open( PS, "/usr/bin/vmstat 1 ${count} |" )
+    || return 1;
+while (<PS>) {
+    my $line = $_;
+    $line =~ s/^\s+|\s+$//g;
+
+    printf( "[debug] vmstat: %s\n", $line ) if ($debug);
+
+    my @counters = split( /[\t \n]+/, $line );
+
+    next unless @counters;
+    next unless $counters[0] =~ /\d+/;
+
+    foreach my $item ( keys( %{$items} ) ) {
+        printf( "[debug] %s => %s\n", $item, $counters[ $items->{$item} ] )
+            if ($debug);
+        $stats->{$item}          ||= {};
+        $stats->{$item}->{count} ||= 0;
+        $stats->{$item}->{sum}   ||= 0;
+        $stats->{$item}->{count}++;
+        $stats->{$item}->{sum} += $counters[ $items->{$item} ];
+    }
+}
+
+# Status output
+$usage = 100 - ( $stats->{idle}->{sum} / $stats->{idle}->{count} );
+$message = sprintf( "CPU usage at %.2f%%", $usage );
+if ( $usage >= $crit ) {
+    $exitstatus = "CRITICAL";
+}
+elsif ( $usage >= $warn ) {
+    $exitstatus = "WARNING";
+}
+elsif ( $usage < $warn ) {
+    $exitstatus = "OK";
+}
+else {
+    $message    = sprintf("Unable to determine CPU usage");
+    $exitstatus = "UNKNOWN";
+}
+
+# Performance data
+#
+# - usage, with min and max
+push( @perfdata,
+    sprintf( "'%s'=%.2f%s;%.2f;%.2f", 'usage', $usage, '%', $warn, $crit ) );
+
+# - other
+foreach my $item ( keys( %{$stats} ) ) {
+    push(
+        @perfdata,
+        sprintf( "'%s'=%.2f%s",
+            $item, $stats->{$item}->{sum} / $stats->{$item}->{count}, '%' )
+    );
+}
+
+printf( "%s - %s|%s\n|", $exitstatus, $message, shift @perfdata );
+printf( "%s\n", join( " ", @perfdata ) );
+exit $STATUSCODE{$exitstatus};
+
+__END__
+
+=head1 NAME
+
+check_aix_cpu - Check CPU usage
+
+=head1 SYNOPSIS
+
+check_aix_cpu [options]
+
+Options:
+ [-w <warning threshold>]
+ [-c <critical threshold>]
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-c|--critical THRESHOLD>
+
+Set critical threshold in percent.  Default is 99.
+
+=item B<-w|--warning THRESHOLD>
+
+Set critical threshold in percent.  Default is 90.
+
+=item B<-d|--debug>
+
+Debug plugin state while running.
+
+=item B<-h|--help>
+
+Print brief help message and exit.
+
+=item B<-m|--man>
+
+Print manual page and exit.
+
+=back
+
+=head1 DESCRIPTION
+
+B<check_aix_cpu> will run vmstat for a few seconds to measure CPU
+usage based on processor idle time, and compare them to the warning
+and critical thresholds.
+
+=cut

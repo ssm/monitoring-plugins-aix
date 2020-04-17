@@ -1,0 +1,287 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+
+my %STATUSCODE = (
+    'UNKNOWN'  => '3',
+    'OK'       => '0',
+    'WARNING'  => '1',
+    'CRITICAL' => '2'
+);
+
+my ( $status, $idle, $usage, $debug, $help, $man );
+my $warn  = 92;
+my $crit  = 98;
+my $count = 5;
+my $stats = {};
+my @perfdata;
+my $exitstatus;
+my $message    = 'No idea';
+my $block_size = 1024;
+
+my @filesystems;
+my @warnings;
+my @criticals;
+my @path_whitelist;
+my @path_blacklist;
+my @lines;
+
+$status = GetOptions(
+    "debug|d"          => \$debug,
+    "warn|w=s"         => \$warn,
+    "crit|c=i"         => \$crit,
+    "path-include|p=s" => \@path_whitelist,
+    "path-exclude|x=s" => \@path_blacklist,
+    "help|h"           => \$help,
+    "man|m"            => \$man
+) or pod2usage(3);
+pod2usage(1) if $help;
+pod2usage( -verbose => 2 ) if $man;
+
+# Functions
+sub prettyBytes {
+    my $size = $_[0];
+    foreach ( 'B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB' ) {
+        return sprintf( "%.2f", $size ) . " $_" if $size < 1024;
+        $size /= 1024;
+    }
+}
+
+sub exit_simple {
+    my $exitstatus = shift;
+    my $message    = shift;
+    my @perfdata   = @_;
+
+    if (@perfdata) {
+        printf( "%s - %s|%s\n",
+            $exitstatus, $message, join( " ", @perfdata ) );
+    }
+    else {
+        printf "%s - %s\n", $exitstatus, $message;
+    }
+    exit( $STATUSCODE{$exitstatus} );
+}
+
+# Run command
+$ENV{'LANG'} = 'c';
+my $pid = open( my $df, "-|", "/usr/bin/df", "-k" );
+if ($pid) {
+    while (<$df>) {
+        my $line = $_;
+        $line =~ s/^\s+|\s+$//g;
+        push @lines, $line;
+    }
+    close($df) || do {
+        $message = sprintf( "Unexpected exit status from df: %s", $? >> 8 );
+        $exitstatus = 'UNKNOWN';
+        exit_simple( $exitstatus, $message );
+        }
+}
+else {
+    $message    = 'Unable to execute df';
+    $exitstatus = 'UNKNOWN';
+    exit_simple( $exitstatus, $message );
+}
+
+# Parse output
+for my $line (@lines) {
+    printf( "[debug] %s\n", $line ) if ($debug);
+    if ($line =~ m{
+          ^
+          (/\S+) # filesystem
+          \s+
+          (\d+)  # 1024-blocks
+          \s+
+          (\d+)  # Free
+          \s+
+          (\d+)% # %Used
+          \s+
+          (\d+)  # Iused
+          \s+
+          (\d+)% # %Iused
+          \s+
+          (/.*)  # Mounted on
+          $
+        }x
+        )
+    {
+        printf( "[debug] Matched: %s\n", $line ) if ($debug);
+
+        my $blocks_total = int $2;
+        my $blocks_free  = int $3;
+        my $blocks_used  = $blocks_total - $blocks_free;
+
+        my $bytes_total = $blocks_total * $block_size;
+        my $bytes_used  = $blocks_used * $block_size;
+        my $filesystem  = $1;
+        my $mounted_on  = $7;
+
+        push(
+            @filesystems,
+            {   filesystem          => $filesystem,
+                mounted_on          => $mounted_on,
+                blocks_used_percent => int $4,
+                bytes_total         => $bytes_total,
+                bytes_used          => $bytes_used,
+            }
+        );
+    }
+    else {
+        printf( "[debug] Skipping: %s\n", $line ) if ($debug);
+    }
+}
+
+# whitelist / blacklist
+if (@path_whitelist) {
+    my @candidates;
+    for my $path (@path_whitelist) {
+        for my $filesystem (@filesystems) {
+            if ( $filesystem->{mounted_on} =~ /$path/ ) {
+                push @candidates, $filesystem;
+            }
+        }
+    }
+    @filesystems = @candidates;
+}
+elsif (@path_blacklist) {
+    my @candidates;
+    for my $path (@path_blacklist) {
+        for my $filesystem (@filesystems) {
+            if ( $filesystem->{mounted_on} !~ /$path/ ) {
+                push @candidates, $filesystem;
+            }
+        }
+    }
+    @filesystems = @candidates;
+}
+
+# Enrich
+
+@filesystems = (
+    map {
+        $_->{message} = sprintf(
+            "%s is %s%% full (used %s of %s)",
+            $_->{mounted_on},
+            $_->{blocks_used_percent},
+            prettyBytes( $_->{bytes_used} ),
+            prettyBytes( $_->{bytes_total} )
+        );
+        $_->{perfdata} = sprintf(
+            "'%s'=%sB;%s;%s;%s;%s",
+            $_->{mounted_on}, $_->{bytes_used},
+            $_->{bytes_total} * $warn / 100,
+            $_->{bytes_total} * $crit / 100,
+            0, $_->{bytes_total}
+        );
+        $_
+    } @filesystems
+);
+
+# Filter
+
+@warnings  = map { $_->{blocks_used_percent} > $warn ? $_ : () } @filesystems;
+@criticals = map { $_->{blocks_used_percent} > $crit ? $_ : () } @filesystems;
+
+my @messages;
+if (@criticals) {
+    print "[debug] Criticals list is not empty\n" if ($debug);
+    push @messages,
+        "CRITICAL: " . join( ", ", map { $_->{message} } @warnings );
+    $exitstatus = 'CRITICAL';
+}
+elsif (@warnings) {
+    print "[debug] Warnings list is not empty\n" if ($debug);
+    push @messages,
+        "WARNING: " . join( ", ", map { $_->{message} } @warnings );
+    $exitstatus = 'WARNING';
+}
+else {
+    push @messages, "OK: All disks below threshold";
+    $exitstatus = 'OK';
+}
+
+$message = join( '. ', @messages );
+@perfdata = map { $_->{perfdata} } @filesystems;
+
+# The end
+exit_simple( $exitstatus, $message, @perfdata );
+
+__END__
+
+=head1 NAME
+
+check_aix_filesystems - Check filesystem availability
+
+=head1 SYNOPSIS
+
+check_aix_filesystems [options]
+
+Options:
+ [-w <warning threshold>]
+ [-c <critical threshold>]
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-c|--critical THRESHOLD>
+
+Set critical threshold in percent.  Default is 98.
+
+=item B<-w|--warning THRESHOLD>
+
+Set warning threshold in percent.  Default is 92.
+
+=item B<-p|--path-include REGEX>
+
+Regular expression to match against mount points to include.  Can be used
+several times.
+
+=item B<-x|--path-exclude REGEX>
+
+Regular expression to match against mount points to exclude.  Can be used
+several times.
+
+=item B<-d|--debug>
+
+Debug plugin state while running.
+
+=item B<-h|--help>
+
+Print brief help message and exit.
+
+=item B<-m|--man>
+
+Print manual page and exit.
+
+=back
+
+=head1 DESCRIPTION
+
+B<check_aix_filesystems> will check avilable space for each file system, and
+compare them to the warning and critical thresholds.
+
+=head1 EXAMPLES
+
+To use different warning and critcal thresholds for various disks, use
+multiple invocations.  When using from Icinga, this means using
+multiple services.
+
+=over 4
+
+=item B<check_aix_filesystem -x /special>
+
+One with special filesystems excluded, with default warning and
+critical thresholds.
+
+=item B<check_aix_filesystem -p /special -w 99 -c 100>
+
+One with special filesystems included, with specific warning and
+critical thresholds.
+
+=back
+
+=cut

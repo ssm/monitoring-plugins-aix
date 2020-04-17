@@ -1,0 +1,447 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+use File::Find;
+
+my %STATUSCODE = (
+    'UNKNOWN'  => '3',
+    'OK'       => '0',
+    'WARNING'  => '1',
+    'CRITICAL' => '2'
+);
+
+my ( $status, $idle, $usage, $verbose, $debug, $help, $man );
+my $filename_pattern = '.*';
+my $args;
+my $warning;
+my $critical;
+my $perfdata;
+my $exitstatus;
+my $directory;
+my $recurse;
+my @matches;
+my @messages;
+my @perfdata;
+
+Getopt::Long::Configure("no_ignore_case");
+$status = GetOptions(
+    "directory|D=s" => \&handle_directory,
+    "pattern|p=s"   => \$filename_pattern,
+    "warning|w=s"   => \&handle_threshold,
+    "critical|c=s"  => \&handle_threshold,
+    "recurse|r"     => \$recurse,
+    "debug|d"       => \$debug,
+    "verbose|v"     => \$verbose,
+    "help|h"        => \$help,
+    "man|m"         => \$man
+) or pod2usage(3);
+pod2usage(1) if $help;
+pod2usage( -verbose => 2 ) if $man;
+
+# Sanity checks
+if ( !defined($directory) ) {
+    pod2usage(
+        {
+            -message => "Error: please specify directory",
+            -exitval => $STATUSCODE{'UNKNOWN'},
+        }
+    );
+}
+
+# Gather
+File::Find::find(
+    {
+        preprocess => \&preprocess,
+        wanted     => \&wanted,
+    },
+    $directory
+);
+
+# Evaluate
+my $match_counter = scalar(@matches);
+if ( $critical || $warning ) {
+    if (
+        $critical
+        && !value_within_range(
+            {
+                name  => 'critical',
+                range => $critical,
+                value => $match_counter
+            }
+        )
+        )
+    {
+        $exitstatus = 'CRITICAL';
+        push @messages, sprintf( '%s matching files, outside critical threshold "%s"', $match_counter, $critical );
+    }
+    elsif ( $warning
+        && !value_within_range( { name => 'warning', range => $warning, value => $match_counter } ) )
+    {
+        $exitstatus = 'WARNING';
+        push @messages, sprintf( '%s matching files, outside warning threshold "%s"', $match_counter, $warning );
+    }
+    else {
+        $exitstatus = 'OK';
+        push @messages, sprintf( '%s matching files found, within threshold', $match_counter );
+    }
+    push @perfdata,
+        sprintf( "files=%s;%s;%s",
+        $match_counter,
+        defined($warning)  ? $warning  : '',
+        defined($critical) ? $critical : '' );
+}
+elsif (@matches) {
+    $exitstatus = 'OK';
+    push @messages, sprintf( "%d matching files found", $match_counter );
+    push @perfdata, sprintf( "files=%s", $match_counter );
+}
+else {
+    $exitstatus = 'CRITICAL';
+    push @messages, "No matching files found";
+}
+
+if ($verbose) {
+    push @messages, @matches;
+}
+
+# The end
+printstatus(
+    {
+        exitstatus => $exitstatus,
+        messages   => \@messages,
+        perfdata   => \@perfdata
+    }
+);
+exit( $STATUSCODE{$exitstatus} );
+
+# Functions
+
+sub handle_directory {
+    my ( $opt_name, $opt_value ) = @_;
+    my ( $dev, $ino, $mode, $nlink, $uid, $gid );
+    if ( ( $dev, $ino, $mode, $nlink, $uid, $gid ) = lstat($opt_value) ) {
+        if ( -d _ ) {
+            $directory = $opt_value;
+        }
+        else {
+            my $message = sprintf( "Error: %s is not a directory", $opt_value );
+            pod2usage( { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
+        }
+    }
+    else {
+        my $message = sprintf( "Error: %s does not exist, or is not readable", $opt_value );
+        pod2usage( { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
+    }
+}
+
+sub handle_threshold {
+    my ( $threshold_name, $threshold_value ) = @_;
+    printf( "[debug] Checking %s threshold range %s\n", $threshold_name, $threshold_value )
+        if ($debug);
+    if ( check_range_format($threshold_value) ) {
+        if ( $threshold_name eq "warning" ) {
+            $warning = $threshold_value;
+        }
+        elsif ( $threshold_name eq "critical" ) {
+            $critical = $threshold_value;
+        }
+        else {
+            die( sprintf( "[bug] Invalid threshold %s", $threshold_name ) );
+        }
+    }
+    else {
+        my $message = sprintf( "Invalid range %s for %s\n", $threshold_name, $threshold_value );
+        pod2usage( { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
+    }
+}
+
+# Preprocess is run for each directory found
+use Data::Dumper;
+sub preprocess {
+    if ($recurse) {
+      return @_;
+    }
+    else {
+      return grep { not -d } @_;
+    }
+}
+
+sub wanted {
+    my ( $dev, $ino, $mode, $nlink, $uid, $gid );
+    if ( ( $dev, $ino, $mode, $nlink, $uid, $gid ) = lstat($_) ) {
+        if ( -f _ && /$filename_pattern/s ) {
+            push( @matches, $File::Find::name );
+        }
+    }
+}
+
+sub printstatus {
+    my ($arg_ref)  = @_;
+    my $exitstatus = $arg_ref->{exitstatus};
+    my $messages   = $arg_ref->{messages};
+    my $perfdata   = $arg_ref->{perfdata};
+    my @messages   = @{$messages};
+    my @perfdata   = @{$perfdata};
+
+    # First line of status
+    printf( "%s - %s", $exitstatus, shift @messages );
+    if (@perfdata) {
+        printf "|%s", join( " ", @perfdata );
+    }
+
+    # Extra status message lines, if any
+    if (@messages) {
+        printf "\n%s", join( "\n", @messages );
+    }
+    printf "\n";
+}
+
+sub check_range_format {
+    my $range = shift;
+    return (
+        $range =~ m{
+                            ^                     # beginning of string
+                            @?                    # inversion of range, if present
+                            (
+                                (~|-?\d+):        # above $1
+                            |
+                                :?(\d+)           # between 0 and $1
+                            |
+                                (~|-?\d+):(-?\d+) # between $1 and $2
+                            )
+                            $                     # end of string
+                    }x
+    );
+}
+
+sub value_within_range {
+    my ($arg_ref) = @_;
+    my $range     = $arg_ref->{range};
+    my $value     = $arg_ref->{value};
+    my $name      = $arg_ref->{name};
+    my $min;
+    my $max;
+    my $inversion;
+    my $result;
+
+    # Check parameters
+    die("[bug] Missing range") unless ( defined $range );
+    die("[bug] Missing value") unless ( defined $value );
+    die("[bug] Missing name")  unless ( defined $name );
+
+    # Check for inversion, remove "@"
+    if ( $range =~ /^@(.*)/ ) {
+        $inversion = 1;
+        $range     = $1;
+    }
+
+    # example: "10", ":10", outside { 0 .. 10 }
+    if ( $range =~ /^:?(\d+)$/ ) {
+        $min    = 0;
+        $max    = $1;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "10:", outside { 10 .. inf }
+    elsif ( $range =~ /^(-?\d+):$/ ) {
+        $min    = $1;
+        $result = ( $min <= $value );
+    }
+
+    # example: ~:10, outside { -inf .. 10 }
+    elsif ( $range =~ /^~:(-?\d+)$/ ) {
+        $max    = $1;
+        $result = ( $value <= $max );
+    }
+
+    # example: 1:10, -10:-1, -10:10, outside { MIN .. MAX }
+    elsif ( $range =~ /^(-?\d+):(-?\d+)$/ ) {
+        $min    = $1;
+        $max    = $2;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "~:", outside { -inf .. inf }
+    # - makes little sense, but it is valid syntax
+    elsif ( $range =~ /^~:$/ ) {
+        $result = 1;
+    }
+
+    # Safety belt
+    else {
+        my $message = sprintf( "Invalid %s range format. Can not parse %s.\n", $name, $range );
+        pod2usage( { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
+    }
+
+    if ( defined($min) and defined($max) ) {
+        if ( $min > $max ) {
+            my $message = sprintf( "Invalid %s range value. Minimum (%s) must not be higher than maximum (%s)\n",
+                $name, $range, $min, $max );
+            pod2usage( { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
+        }
+    }
+    $result = ( $result xor $inversion );
+    return $result;
+}
+
+__END__
+
+=head1 NAME
+
+check_directory - Check directory for matching files
+
+=head1 SYNOPSIS
+
+check_directory [options]
+
+Options:
+ [-D <DIRECTORY>]
+ [-p <REGEX>]
+ [-w <THRESHOLD>]
+ [-c <THRESHOLD>]
+ [-r]
+ [-v]
+ [-d]
+ [-h]
+ [-m]
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-D|--directory DIRECTORY>
+
+Look for matching files in DIRECTORY.
+
+Without any other options, it will exit OK if the directory exists and
+contain at least one file.  If it is empty, it will exit CRITICAL.
+
+If the directory does not exist, it will exit with UNKNOWN status.
+
+=item B<-p|--pattern REGEX>
+
+Look for file names matching the regular expression.
+
+=item B<-r|--recurse>
+
+Look recursively in all subdirectories under B<-D|--directory
+DIRECTORY>. Default is not to traverse directories, but look in the
+top level of B<DIRECTORY> only.
+
+=item B<-c|--critical THRESHOLD>
+
+Exit with CRITICAL severity if the number of files dos not match the
+threshold.  See THRESHOLDS in the manual page for values.
+
+=item B<-c|--warning THRESHOLD>
+
+Exit with WARNING severity if the number of files dos not match the
+threshold.  See THRESHOLDS in the manual page for values.
+
+=item B<-d|--debug>
+
+Debug plugin state while running.
+
+=item B<-v|--verbose>
+
+Add extra information about matching files to status output.
+
+=item B<-h|--help>
+
+Print brief help message and exit.
+
+=item B<-m|--man>
+
+Print manual page and exit.
+
+=back
+
+=head1 DESCRIPTION
+
+B<check_directory> will check a directory for files matching the
+selection criteria.  If found, and it contains at least one file, the
+plugin will exit with status 0 (OK), otherwise it will exit with
+status 3 (CRITICAL).
+
+The only required option is B<--directory>.
+
+If the directory does not exist, this plugin will exit with status
+UNKNOWN.
+
+If the directory exists, and it contains at least one file, this
+plugin will exit with status OK.
+
+=head1 THRESHOLDS
+
+A threshold is a range with an alert level (either warning or
+critical).  The general format for ranges is:
+
+=over 4
+
+C<[@]start:end>
+
+=back
+
+C<start> must be lower than C<end>.
+
+C<start> and C<:> is not required if start is 0.
+
+If range is of format C<start:> and end is not specified, end is
+infinity.
+
+Negative infinity is specified as C<~>.
+
+=head2 EXAMPLE THRESHOLDS
+
+Generate alert for range if value is...
+
+=over 4
+
+=item B<10>
+
+Outside the range of C<{0 .. 10}>
+
+=item B<10:>
+
+Outside the range of C<{10 .. infinity}>
+
+=item B<~:10>
+
+Outside the range of C<{-infinity .. 10}>
+
+=item B<10:20>
+
+Outside the range of C<{10 .. 20}>
+
+=item B<@10:20>
+
+Inside the range of C<{10 .. 20}>
+
+=back
+
+=head1 EXAMPLES
+
+=over 4
+
+=item B<check_directory --directory /srv/foo>
+
+Look for a directory called C</srv/foo>.  If it exists, exit with OK.
+
+=item B<check_directory --directory /srv/foo> --filename "prod"
+
+Look in the directory C</srv/foo> for at least one file with a name
+that contains C<prod>.  If the directory exists and at least one file
+mathces, exit with OK.  If the directory exists, and no file matches,
+exit with CRITICAL.  If the directory does not exist, exit with
+UNKNOWN.
+
+=back
+
+=head1 SEE ALSO
+
+L<File::Find>
+
+=cut

@@ -1,0 +1,529 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+use Carp;
+use English qw( -no_match_vars );
+
+my %STATUSCODE = (
+    'UNKNOWN'  => '3',
+    'OK'       => '0',
+    'WARNING'  => '1',
+    'CRITICAL' => '2'
+);
+
+my ( $status, $idle, $usage, $verbose, $debug, $help, $man );
+my $args;
+my $warning;
+my $critical;
+my $perfdata;
+my $exitstatus;
+my $filename;
+my $pattern;
+my $exclude_pattern;
+my $statefile;
+my ( $state_inode, $state_offset );
+my @matches;
+my @messages;
+my @perfdata;
+
+Getopt::Long::Configure("no_ignore_case");
+$status = GetOptions(
+    "filename|f=s"  => \$filename,
+    "pattern|p=s"   => \$pattern,
+    "exclude|x=s"   => \$exclude_pattern,
+    "warning|w=s"   => \&handle_threshold,
+    "critical|c=s"  => \&handle_threshold,
+    "statefile|s=s" => \$statefile,
+    "debug|d"       => \$debug,
+    "verbose|v"     => \$verbose,
+    "help|h"        => \$help,
+    "man|m"         => \$man
+) or pod2usage(3);
+pod2usage(1) if $help;
+pod2usage( -verbose => 2 ) if $man;
+
+# Sanity checks
+if ( !defined($filename) ) {
+    pod2usage(
+        {
+            -message => "Error: please specify file name",
+            -exitval => $STATUSCODE{'UNKNOWN'},
+        }
+    );
+}
+if ( !defined($pattern) ) {
+    pod2usage(
+        {
+            -message => "Error: please specify pattern",
+            -exitval => $STATUSCODE{'UNKNOWN'},
+        }
+    );
+}
+
+##############################
+# Gather
+open my $FILE, '<', $filename
+    or croak "Can't open '${filename}': ${OS_ERROR}";
+
+my @file_stat  = stat($FILE);
+my $file_inode = $file_stat[1];
+my $file_size  = $file_stat[7];
+
+if ($statefile) {
+    ( $state_inode, $state_offset ) = read_state( { statefile => $statefile } );
+
+    # Check if file is the same as last time
+    if ( defined($state_inode) && $state_inode == $file_inode ) {
+
+        # Check if file has been truncated
+        if ( $state_offset > $file_size ) {
+            $state_offset = 0;
+        }
+        else {
+            seek( $FILE, $state_offset, 0 );
+        }
+    }
+    else {
+        # New file or new statefile
+        $state_inode  = $file_inode;
+        $state_offset = 0;
+    }
+}
+
+while (<$FILE>) {
+    my $line = $_;
+    chomp($line);
+    $state_offset = tell($FILE) if ($statefile);
+    if ( $pattern && /$pattern/ ) {
+        if ($exclude_pattern) {
+            push( @matches, $line ) unless /$exclude_pattern/;
+        }
+        else {
+            push @matches, $line;
+        }
+    }
+}
+close($FILE);
+write_state( { statefile => $statefile, inode => $state_inode, offset => $state_offset } ) if ($statefile);
+
+##############################
+# Evaluate
+my $match_counter = scalar(@matches);
+if ( $critical || $warning ) {
+    if (
+        $critical
+        && !value_within_range(
+            {
+                name  => 'critical',
+                range => $critical,
+                value => $match_counter
+            }
+        )
+        )
+    {
+        $exitstatus = 'CRITICAL';
+        push @messages, sprintf( '%s matching lines. Critical threshold "%s"', $match_counter, $critical );
+    }
+    elsif ( $warning
+        && !value_within_range( { name => 'warning', range => $warning, value => $match_counter } ) )
+    {
+        $exitstatus = 'WARNING';
+        push @messages, sprintf( '%s matching lines. Warning threshold "%s"', $match_counter, $warning );
+    }
+    else {
+        $exitstatus = 'OK';
+        push @messages, sprintf( '%s matching lines.', $match_counter );
+    }
+    push @perfdata,
+        sprintf( "lines=%s;%s;%s",
+        $match_counter,
+        defined($warning)  ? $warning  : '',
+        defined($critical) ? $critical : '' );
+}
+elsif (@matches) {
+    $exitstatus = 'OK';
+    push @messages, sprintf( "%d matching lines found", $match_counter );
+    push @perfdata, sprintf( "lines=%s", $match_counter );
+}
+else {
+    $exitstatus = 'CRITICAL';
+    push @messages, "No matching lines found";
+}
+
+if ($verbose) {
+    push @messages, @matches;
+}
+
+# The end
+printstatus(
+    {
+        exitstatus => $exitstatus,
+        messages   => \@messages,
+        perfdata   => \@perfdata
+    }
+);
+exit( $STATUSCODE{$exitstatus} );
+
+# Functions
+sub handle_threshold {
+    my ( $threshold_name, $threshold_value ) = @_;
+    printf( "[debug] Checking %s threshold range %s\n", $threshold_name, $threshold_value )
+        if ($debug);
+    if ( check_range_format($threshold_value) ) {
+        if ( $threshold_name eq "warning" ) {
+            $warning = $threshold_value;
+        }
+        elsif ( $threshold_name eq "critical" ) {
+            $critical = $threshold_value;
+        }
+        else {
+            confess( sprintf( "Invalid threshold %s", $threshold_name ) );
+        }
+    }
+    else {
+        my $message = sprintf( "Invalid range %s for %s\n", $threshold_name, $threshold_value );
+        die($message);
+    }
+}
+
+sub read_state {
+    my $arg_ref   = shift;
+    my $statefile = $arg_ref->{statefile};
+    my $inode;
+    my $offset;
+
+    if ( -f $statefile ) {
+        open( my $in, '<', $statefile ) or die( sprintf( "[error] Unable to read from statefile %s", $statefile ) );
+        while (<$in>) {
+            chomp;
+            if (/^inode=(\d+)/) {
+                $inode = $1;
+                printf( "[debug] Read state inode=%s\n", $inode ) if ($debug);
+            }
+            if (/^offset=(\d+)/) {
+                $offset = $1;
+                printf( "[debug] Read state offset=%s\n", $offset ) if ($debug);
+            }
+        }
+        close $in;
+    }
+
+    if ( $inode && $offset ) {
+        return ( $inode, $offset );
+    }
+    else {
+        return;
+    }
+}
+
+sub write_state {
+    my $arg_ref   = shift;
+    my $statefile = $arg_ref->{statefile};
+    my $inode     = $arg_ref->{inode};
+    my $offset    = $arg_ref->{offset};
+
+    if ( -l $statefile ) {
+        die( sprintf("[error] Statefile %s is a symbolic link, not touching that.\n"), $statefile );
+    }
+
+    printf( "[debug] Write state inode=%s, offset=%s\n", $inode, $offset ) if ($debug);
+    open( my $out, '>', $statefile ) or die( sprintf( "[error] Unable to write to statefile %s", $statefile ) );
+    printf $out "inode=%s\n",  $inode;
+    printf $out "offset=%s\n", $offset;
+    close $out;
+}
+
+sub printstatus {
+    my ($arg_ref)  = @_;
+    my $exitstatus = $arg_ref->{exitstatus};
+    my $messages   = $arg_ref->{messages};
+    my $perfdata   = $arg_ref->{perfdata};
+    my @messages   = @{$messages};
+    my @perfdata   = @{$perfdata};
+
+    # First line of status
+    printf( "%s - %s", $exitstatus, shift @messages );
+    if (@perfdata) {
+        printf "|%s", join( " ", @perfdata );
+    }
+
+    # Extra status message lines, if any
+    if (@messages) {
+        printf "\n%s", join( "\n", @messages );
+    }
+    printf "\n";
+}
+
+sub check_range_format {
+    my $range = shift;
+    return (
+        $range =~ m{
+                       ^                     # beginning of string
+                       @?                    # inversion of range, if present
+                       (
+                           (~|-?\d+):        # above $1
+                       |
+                           :?(\d+)           # between 0 and $1
+                       |
+                           (~|-?\d+):(-?\d+) # between $1 and $2
+                       )
+                       $                     # end of string
+               }x
+    );
+}
+
+sub value_within_range {
+    my ($arg_ref) = @_;
+    my $range     = $arg_ref->{range};
+    my $value     = $arg_ref->{value};
+    my $name      = $arg_ref->{name};
+    my $min;
+    my $max;
+    my $inversion;
+    my $result;
+
+    # Check parameters
+    confess("Missing range") unless ( defined $range );
+    confess("Missing value") unless ( defined $value );
+    confess("Missing name")  unless ( defined $name );
+
+    # Check for inversion, remove "@"
+    if ( $range =~ /^@(.*)/ ) {
+        $inversion = 1;
+        $range     = $1;
+    }
+
+    # example: "10", ":10", outside { 0 .. 10 }
+    if ( $range =~ /^:?(\d+)$/ ) {
+        $min    = 0;
+        $max    = $1;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "10:", outside { 10 .. inf }
+    elsif ( $range =~ /^(-?\d+):$/ ) {
+        $min    = $1;
+        $result = ( $min <= $value );
+    }
+
+    # example: ~:10, outside { -inf .. 10 }
+    elsif ( $range =~ /^~:(-?\d+)$/ ) {
+        $max    = $1;
+        $result = ( $value <= $max );
+    }
+
+    # example: 1:10, -10:-1, -10:10, outside { MIN .. MAX }
+    elsif ( $range =~ /^(-?\d+):(-?\d+)$/ ) {
+        $min    = $1;
+        $max    = $2;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "~:", outside { -inf .. inf }
+    # - makes little sense, but it is valid syntax
+    elsif ( $range =~ /^~:$/ ) {
+        $result = 1;
+    }
+
+    # Safety belt
+    else {
+        my $message = sprintf( "Invalid %s range format. Can not parse %s.\n", $name, $range );
+        pod2usage( { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
+    }
+
+    if ( defined($min) and defined($max) ) {
+        if ( $min > $max ) {
+            my $message = sprintf( "Invalid %s range value. Minimum (%s) must not be higher than maximum (%s)\n",
+                $name, $range, $min, $max );
+            pod2usage( { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
+        }
+    }
+    $result = ( $result xor $inversion );
+    return $result;
+}
+
+__END__
+
+=head1 NAME
+
+check_file - Check file for matching lines
+
+=head1 SYNOPSIS
+
+check_file [options]
+
+Options:
+ <-f <FILE>
+ <-p REGEX>
+ [-x <REGEX> ]
+ [-w <THRESHOLD>]
+ [-c <THRESHOLD>]
+ [-s <FILE>]
+ [-v]
+ [-d]
+ [-h]
+ [-m]
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-f|--file FILE>
+
+Look for matching lines in FILE.
+
+Without any other options, it will [...]
+
+If the file does not exist, it will exit with UNKNOWN status.
+
+=item B<-p|--pattern REGEX>
+
+Look for lines matching the regular expression.
+
+=item B<-x|--exclude REGEX>
+
+Exclude lines matching the regular expression.
+
+=item B<-c|--critical THRESHOLD>
+
+Exit with CRITICAL severity if the number of lines does not match the
+threshold.  See THRESHOLDS in the manual page for values.
+
+=item B<-c|--warning THRESHOLD>
+
+Exit with WARNING severity if the number of lines does not match the
+threshold.  See THRESHOLDS in the manual page for values.
+
+=item B<-s|--statefile STATEFILE>
+
+Store the last read position from B<-f FILE> in B<STATEFILE>, and
+continue from there on the next invocation.
+
+If B<STATEFILE> is missing, it will be created.
+
+If B<FILE> is truncated (current size size is smaller than last read
+position) or replaced (inode number is changed), this plugin will read
+the file from the beginning.
+
+=item B<-d|--debug>
+
+Debug plugin state while running.
+
+=item B<-v|--verbose>
+
+Add extra information about matching lines to status output.
+
+=item B<-h|--help>
+
+Print brief help message and exit.
+
+=item B<-m|--man>
+
+Print manual page and exit.
+
+=back
+
+=head1 DESCRIPTION
+
+B<check_file> will check a file for lines matching the pattern.  The
+number of matches will be compared to the warning and critical
+thresholds, and exit accordingly.
+
+The required options are B<--file> and B<--pattern>.
+
+If the file does not exist, this plugin will exit with status UNKNOWN.
+
+=head1 THRESHOLDS
+
+A threshold is a range with an alert level (either warning or
+critical).  The general format for ranges is:
+
+=over 4
+
+C<[@]start:end>
+
+=back
+
+C<start> must be lower than C<end>.
+
+C<start> and C<:> is not required if start is 0.
+
+If range is of format C<start:> and end is not specified, end is
+infinity.
+
+Negative infinity is specified as C<~>.
+
+=head2 EXAMPLE THRESHOLDS
+
+Generate alert for range if value is...
+
+=over 4
+
+=item B<10>
+
+Outside the range of C<{0 .. 10}>
+
+=item B<10:>
+
+Outside the range of C<{10 .. infinity}>
+
+=item B<~:10>
+
+Outside the range of C<{-infinity .. 10}>
+
+=item B<10:20>
+
+Outside the range of C<{10 .. 20}>
+
+=item B<@10:20>
+
+Inside the range of C<{10 .. 20}>
+
+=back
+
+=head1 EXAMPLES
+
+=over 4
+
+=item B<check_file --file /var/lib/app/status.txt --pattern 'RUNNING'>
+
+Look for lines matching 'RUNNING' in a file called
+C</var/lib/app/status.txt>.  If any line matches, the plugin will exit
+B<OK>. If no line matches, the plugin will exit with B<CRITICAL>
+status.
+
+=item B<check_file --file /var/log/app/stdout.log --statefile /var/tmp/applog.state --pattern 'RUNNING'>
+
+Look for lines matching 'RUNNING' in a file called
+C</var/lib/app/status.txt>.
+
+If any line matches, the plugin will exit B<OK>. If no line matches,
+the plugin will exit with B<CRITICAL> status.
+
+Read the last read position from the state file if it exists. Continue
+reading the log file from that postition.  When end of file is
+reached, store the last read position in the state file.
+
+The plugin also checks for replaced or truncated files when using a
+state file.
+
+=item B<check_file --file /var/lib/app/status.txt --pattern 'ERROR' --exclude 'irrelephant'>
+
+Look for lines matching 'RUNNING' and not matching 'irrelephant' in a
+file called C</var/lib/app/status.txt>.  If any line matches still
+remain, the plugin will exit B<OK>. If no line matches, the plugin
+will exit with B<CRITICAL> status.
+
+=item B<check_file --file /var/log/app.log --pattern 'ERROR|FAILURE' --warning 1:10 --critical 10:>
+
+Look for lines matching B<ERROR> or B<FAILURE> in a file called
+C</var/log/app.log>.  If there are 0 matches matches, the plugin will
+exit B<OK>. If  line matches, the plugin will exit with B<CRITICAL>
+status.
+
+=back
+
+=cut
