@@ -23,7 +23,7 @@ if [ ! -x "${CURL}" ]; then
   exit "${UNKNOWN}"
 fi
 
-while getopts "hH:P:u:e:" opt; do
+while getopts "hH:P:u:s:e:" opt; do
   case $opt in
     h) usage; exit;;
     H) HTTP_ADDRESS="$OPTARG";;
