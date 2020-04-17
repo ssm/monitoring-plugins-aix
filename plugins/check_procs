@@ -63,112 +63,19 @@ sub printstatus {
     printf "\n";
 }
 
-sub check_range_format {
-    my $range = shift;
-    return (
-        $range =~ m{
-                            ^                     # beginning of string
-                            @?                    # inversion of range, if present
-                            (
-                                (~|-?\d+):        # above $1
-                            |
-                                :?(\d+)           # between 0 and $1
-                            |
-                                (~|-?\d+):(-?\d+) # between $1 and $2
-                            )
-                            $                     # end of string
-                    }x
-    );
-}
-
-sub value_within_range {
-    my ($arg_ref) = @_;
-    my $range     = $arg_ref->{range};
-    my $value     = $arg_ref->{value};
-    my $name      = $arg_ref->{name};
-    my $min;
-    my $max;
-    my $inversion;
-    my $result;
-
-    # Check parameters
-    die("[bug] Missing range") unless ( defined $range );
-    die("[bug] Missing value") unless ( defined $value );
-    die("[bug] Missing name")  unless ( defined $name );
-
-    # Check for inversion, remove "@"
-    if ( $range =~ /^@(.*)/ ) {
-        $inversion = 1;
-        $range     = $1;
-    }
-
-    # example: "10", outside { 0 .. 10 }
-    if ( $range =~ /^(\d+)$/ ) {
-        $min    = 0;
-        $max    = $1;
-        $result = ( $min <= $value && $value <= $max );
-    }
-
-    # example: "10:", outside { 10 .. inf }
-    elsif ( $range =~ /^(-?\d+):$/ ) {
-        $min    = $1;
-        $result = ( $min <= $value );
-    }
-
-    # example: ~:10, outside { -inf .. 10 }
-    elsif ( $range =~ /^~:(-?\d+)$/ ) {
-        $max    = $1;
-        $result = ( $value <= $max );
-    }
-
-    # example: 1:10, -10:-1, -10:10
-    elsif ( $range =~ /^(-?\d+):(-?\d+)$/ ) {
-        $min    = $1;
-        $max    = $2;
-        $result = ( $min <= $value && $value <= $max );
-    }
-
-    # example: "~:", outside { -inf .. inf }
-    # - makes little sense, but it is valid syntax
-    elsif ( $range =~ /^~:$/ ) {
-        $result = 1;
-    }
-
-    # Safety belt
-    else {
-        die(sprintf(
-                "Invalid %s range format. Can not parse %s.\n",
-                $name, $range
-            )
-        );
-    }
-
-    if ( defined($min) and defined($max) ) {
-        if ( $min > $max ) {
-            die(sprintf(
-                    "Invalid %s range value. Minimum (%s) must not be higher than maximum (%s)\n",
-                    $name, $range, $min, $max
-                )
-            );
-        }
-    }
-    $result = ( $result xor $inversion );
-    return $result;
-}
-
 # Sanity checks
 
 if ($warning) {
     printf( "[debug] Checking --warning argument %s\n", $warning )
         if ($debug);
     die "Invalid range format for --warning\n"
-        unless check_range_format($warning);
+        unless Range::check_format($warning);
 }
 if ($critical) {
     printf( "[debug] Checking --critical argument %s\n", $critical )
         if ($debug);
     die "Invalid range format for --critical\n"
-        unless check_range_format($critical);
+        unless Range::check_format($critical);
 }
 
 # Run command
@@ -249,7 +156,7 @@ my $process_count = scalar(@processes);
 
 if ( $critical || $warning ) {
     if ($critical
-        && !value_within_range(
+        && !Range::check_value(
             {   name  => 'critical',
                 range => $critical,
                 value => $process_count
@@ -264,7 +171,7 @@ if ( $critical || $warning ) {
     }
     elsif (
         $warning
-        && !value_within_range(
+        && !Range::check_value(
             { name => 'warning', range => $warning, value => $process_count }
         )
         )
@@ -310,6 +217,105 @@ printstatus(
     }
 );
 exit( $STATUSCODE{$exitstatus} );
+
+##############################
+# Range
+#
+# Functionality for validating and checking against range parameters.
+package Range;
+
+sub check_format {
+    my $range = shift;
+    return (
+        $range =~ m{
+                            ^                     # beginning of string
+                            @?                    # inversion of range, if present
+                            (
+                                (~|-?\d+):        # above $1
+                            |
+                                :?(\d+)           # between 0 and $1
+                            |
+                                (~|-?\d+):(-?\d+) # between $1 and $2
+                            )
+                            $                     # end of string
+                    }x
+    );
+}
+
+sub check_value {
+    my ($arg_ref) = @_;
+    my $range     = $arg_ref->{range};
+    my $value     = $arg_ref->{value};
+    my $name      = $arg_ref->{name};
+    my $min;
+    my $max;
+    my $inversion;
+    my $result;
+
+    # Check parameters
+    die("[bug] Missing range") unless ( defined $range );
+    die("[bug] Missing value") unless ( defined $value );
+    die("[bug] Missing name")  unless ( defined $name );
+
+    # Check for inversion, remove "@"
+    if ( $range =~ /^@(.*)/ ) {
+        $inversion = 1;
+        $range     = $1;
+    }
+
+    # example: "10", outside { 0 .. 10 }
+    if ( $range =~ /^(\d+)$/ ) {
+        $min    = 0;
+        $max    = $1;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "10:", outside { 10 .. inf }
+    elsif ( $range =~ /^(-?\d+):$/ ) {
+        $min    = $1;
+        $result = ( $min <= $value );
+    }
+
+    # example: ~:10, outside { -inf .. 10 }
+    elsif ( $range =~ /^~:(-?\d+)$/ ) {
+        $max    = $1;
+        $result = ( $value <= $max );
+    }
+
+    # example: 1:10, -10:-1, -10:10
+    elsif ( $range =~ /^(-?\d+):(-?\d+)$/ ) {
+        $min    = $1;
+        $max    = $2;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "~:", outside { -inf .. inf }
+    # - makes little sense, but it is valid syntax
+    elsif ( $range =~ /^~:$/ ) {
+        $result = 1;
+    }
+
+    # Safety belt
+    else {
+        die(sprintf(
+                "Invalid %s range format. Can not parse %s.\n",
+                $name, $range
+            )
+        );
+    }
+
+    if ( defined($min) and defined($max) ) {
+        if ( $min > $max ) {
+            die(sprintf(
+                    "Invalid %s range value. Minimum (%s) must not be higher than maximum (%s)\n",
+                    $name, $range, $min, $max
+                )
+            );
+        }
+    }
+    $result = ( $result xor $inversion );
+    return $result;
+}
 
 __END__
 
