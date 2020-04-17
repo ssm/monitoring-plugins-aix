@@ -37,9 +37,8 @@ done
 shift $((OPTIND-1))
 
 HTTP_FULL_REQUEST="${HTTP_SCHEME}://${HTTP_ADDRESS}:${HTTP_PORT}${HTTP_PATH}"
-RESULT=$($CURL --connect-timeout ${CURL_CONNECT_TIMEOUT} -s -o /dev/null -w "%{http_code}" "${HTTP_FULL_REQUEST}")
-
-if [ $? -eq 0 ]; then
+if RESULT=$($CURL --connect-timeout ${CURL_CONNECT_TIMEOUT} -s -o /dev/null -w "%{http_code}" "${HTTP_FULL_REQUEST}")
+then
   if [ -n "${RESULT}" ] && [ "${RESULT}" -eq "${HTTP_EXPECTED_STATUS}" ]; then
     echo "OK - HTTP on ${HTTP_FULL_REQUEST} responds with expected status code (${HTTP_EXPECTED_STATUS})"
     exit $OK
