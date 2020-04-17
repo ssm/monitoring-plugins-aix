@@ -58,12 +58,6 @@ sub process_file {
                 }
             );
             run_check(
-                {   command     => [ 'checkbashisms', $file ],
-                    description => 'checkbashisms',
-                    filename    => $filename,
-                }
-            );
-            run_check(
                 {   command     => [ 'shellcheck', $file ],
                     description => 'shellcheck',
                     filename    => $filename,
