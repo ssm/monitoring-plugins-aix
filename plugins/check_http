@@ -31,6 +31,7 @@ while getopts "hH:P:u:e:" opt; do
     u) HTTP_PATH="$OPTARG";;
     s) HTTP_SCHEME="$OPTARG";;
     e) HTTP_EXPECTED_STATUS="$OPTARG";;
+    *) usage; exit 1;;
   esac
 done
 shift $((OPTIND-1))
