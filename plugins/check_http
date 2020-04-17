@@ -16,7 +16,7 @@ HTTP_PATH="/"
 HTTP_SCHEME="http"
 HTTP_EXPECTED_STATUS="200"
 
-CURL=$(which curl)
+CURL=$(command -v curl)
 CURL_CONNECT_TIMEOUT=5
 if [ ! -x "${CURL}" ]; then
   echo "This script requires curl."
