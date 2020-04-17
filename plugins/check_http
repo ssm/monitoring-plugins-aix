@@ -1,0 +1,52 @@
+#!/bin/sh
+
+set -u
+
+usage () {
+  echo "Usage: ./$(basename "$0") [-h] -H <hostname> -P <port> -u <uri> -s <scheme> -e <expected status code>"
+}
+
+OK=0
+CRITICAL=2
+UNKNOWN=3
+
+HTTP_ADDRESS="localhost"
+HTTP_PORT="80"
+HTTP_PATH="/"
+HTTP_SCHEME="http"
+HTTP_EXPECTED_STATUS="200"
+
+CURL=$(command -v curl)
+CURL_CONNECT_TIMEOUT=5
+if [ ! -x "${CURL}" ]; then
+  echo "This script requires curl."
+  exit "${UNKNOWN}"
+fi
+
+while getopts "hH:P:u:s:e:" opt; do
+  case $opt in
+    h) usage; exit;;
+    H) HTTP_ADDRESS="$OPTARG";;
+    P) HTTP_PORT="$OPTARG";;
+    u) HTTP_PATH="$OPTARG";;
+    s) HTTP_SCHEME="$OPTARG";;
+    e) HTTP_EXPECTED_STATUS="$OPTARG";;
+    *) usage; exit 1;;
+  esac
+done
+shift $((OPTIND-1))
+
+HTTP_FULL_REQUEST="${HTTP_SCHEME}://${HTTP_ADDRESS}:${HTTP_PORT}${HTTP_PATH}"
+if RESULT=$($CURL --connect-timeout ${CURL_CONNECT_TIMEOUT} -s -o /dev/null -w "%{http_code}" "${HTTP_FULL_REQUEST}")
+then
+  if [ -n "${RESULT}" ] && [ "${RESULT}" -eq "${HTTP_EXPECTED_STATUS}" ]; then
+    echo "OK - HTTP on ${HTTP_FULL_REQUEST} responds with expected status code (${HTTP_EXPECTED_STATUS})"
+    exit $OK
+  else
+    echo "CRITICAL - HTTP on ${HTTP_FULL_REQUEST} does not respond with expected status code (${HTTP_EXPECTED_STATUS})"
+    exit $CRITICAL
+  fi
+else
+  printf "CRITICAL - Failed HTTP request against %s" "${HTTP_FULL_REQUEST}"
+  exit $CRITICAL
+fi
