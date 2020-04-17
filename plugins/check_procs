@@ -321,11 +321,11 @@ __END__
 
 =head1 NAME
 
-check_aix_procs - Check running processes
+check_procs - Check running processes
 
 =head1 SYNOPSIS
 
-check_aix_procs [options]
+check_procs [options]
 
 Options:
  [-C <COMMAND>]
@@ -392,7 +392,7 @@ Print manual page and exit.
 
 =head1 DESCRIPTION
 
-B<check_aix_procs> will check for running processes matching the
+B<check_procs> will check for running processes matching the
 selection criteria.  If found, the plugin will exit with status 0
 (OK), otherwise it will exit with status 3 (CRITICAL).
 
@@ -448,12 +448,12 @@ Inside the range of C<{10 .. 20}>
 
 =over 4
 
-=item B<check_aix_procs --user someone --comm usefuld>
+=item B<check_procs --user someone --comm usefuld>
 
 Look for processes owned by the user C<someone> and the process name
 C<usefuld>.
 
-=item B<check_aix_procs --comm java --args com.example.thing>
+=item B<check_procs --comm java --args com.example.thing>
 
 Look for processes where the command is C<java> and the argument list
 includes the string C<com.example.foobar>.
@@ -461,7 +461,7 @@ includes the string C<com.example.foobar>.
 This is a regular expression, so C<(this|that)> will match command
 line arguments containing either C<this> or C<that>.
 
-=item B<check_aix_procs --args /path/to/something -c 5:10>
+=item B<check_procs --args /path/to/something -c 5:10>
 
 Look for processes where the argument list includes
 C</path/to/something>. Exit with CRITICAL status if the number of

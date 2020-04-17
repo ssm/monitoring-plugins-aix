@@ -96,11 +96,11 @@ __END__
 
 =head1 NAME
 
-check_aix_memory - Check CPU usage
+check_memory - Check CPU usage
 
 =head1 SYNOPSIS
 
-check_aix_memory [options]
+check_memory [options]
 
 Options:
  [-w <warning threshold>]
@@ -134,7 +134,7 @@ Print manual page and exit.
 
 =head1 DESCRIPTION
 
-B<check_aix_memory> will run vmstat to check active memory usage, and
+B<check_memory> will run vmstat to check active memory usage, and
 compare it to the warning and critical thresholds.
 
 =cut

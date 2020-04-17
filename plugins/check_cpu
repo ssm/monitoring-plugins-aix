@@ -93,11 +93,11 @@ __END__
 
 =head1 NAME
 
-check_aix_cpu - Check CPU usage
+check_cpu - Check CPU usage
 
 =head1 SYNOPSIS
 
-check_aix_cpu [options]
+check_cpu [options]
 
 Options:
  [-w <warning threshold>]
@@ -131,7 +131,7 @@ Print manual page and exit.
 
 =head1 DESCRIPTION
 
-B<check_aix_cpu> will run vmstat for a few seconds to measure CPU
+B<check_cpu> will run vmstat for a few seconds to measure CPU
 usage based on processor idle time, and compare them to the warning
 and critical thresholds.
 

@@ -213,11 +213,11 @@ __END__
 
 =head1 NAME
 
-check_aix_filesystems - Check filesystem availability
+check_filesystems - Check filesystem availability
 
 =head1 SYNOPSIS
 
-check_aix_filesystems [options]
+check_filesystems [options]
 
 Options:
  [-w <warning threshold>]
@@ -261,7 +261,7 @@ Print manual page and exit.
 
 =head1 DESCRIPTION
 
-B<check_aix_filesystems> will check avilable space for each file system, and
+B<check_filesystems> will check avilable space for each file system, and
 compare them to the warning and critical thresholds.
 
 =head1 EXAMPLES
@@ -272,12 +272,12 @@ multiple services.
 
 =over 4
 
-=item B<check_aix_filesystem -x /special>
+=item B<check_filesystem -x /special>
 
 One with special filesystems excluded, with default warning and
 critical thresholds.
 
-=item B<check_aix_filesystem -p /special -w 99 -c 100>
+=item B<check_filesystem -p /special -w 99 -c 100>
 
 One with special filesystems included, with specific warning and
 critical thresholds.
