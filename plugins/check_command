@@ -1,0 +1,481 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+use Carp;
+
+my %STATUSCODE = (
+    'UNKNOWN'  => '3',
+    'OK'       => '0',
+    'WARNING'  => '1',
+    'CRITICAL' => '2'
+);
+
+my ( $status, $idle, $usage, $debug, $verbose, $help, $man );
+my $match;
+my $warning;
+my $critical;
+my $perfdata;
+my $exitstatus;
+my @messages;
+my @perfdata;
+
+my @matching_lines;
+my @output_lines;
+
+Getopt::Long::Configure("no_ignore_case");
+GetOptions(
+    "match|M=s"    => \$match,
+    "warning|w=s"  => \$warning,
+    "critical|c=s" => \$critical,
+    "debug|d"      => \$debug,
+    "verbose|v"    => \$verbose,
+    "help|h"       => \$help,
+    "man|m"        => \$man
+) or pod2usage(3);
+pod2usage(1)                              if $help;
+pod2usage( -exitval => 0, -verbose => 2 ) if $man;
+
+my @command = @ARGV;
+
+# Functions
+sub printstatus {
+    my ($arg_ref)  = @_;
+    my $exitstatus = $arg_ref->{exitstatus};
+    my $messages   = $arg_ref->{messages};
+    my $perfdata   = $arg_ref->{perfdata};
+    my @messages   = @{$messages};
+    my @perfdata   = @{$perfdata};
+
+    # Check parameters
+    confess("[bug] Missing exitstatus") unless ( defined $exitstatus );
+    confess("[bug] Missing messages")   unless ( defined $messages );
+
+    # First line of status
+    printf( "%s - %s", $exitstatus, shift @messages );
+    if (@perfdata) {
+        printf "|%s", join( " ", @perfdata );
+    }
+
+    # Extra status message lines, if any
+    if (@messages) {
+        printf "\n%s", join( "\n", @messages );
+    }
+    printf "\n";
+}
+
+# Sanity checks
+
+if ( !@command ) {
+    print("Error: No command specified\n");
+    pod2usage(3);
+}
+if ($warning) {
+    die "Invalid range format for --warning\n"
+        unless Range::check_format($warning);
+}
+if ($critical) {
+    die "Invalid range format for --critical\n"
+        unless Range::check_format($critical);
+}
+
+if ( defined($match) and !defined($critical) and !defined($warning) ) {
+    print(
+        "[debug] Got --match without thresholds. Setting critical threshold to \"1:\"\n"
+    );
+    $critical = '1:';
+}
+
+# Run command, capture output
+$ENV{'LANG'} = 'c';
+my $pid = open( my $run, "-|", @command );
+if ($pid) {
+    printf( "[debug] Command \"%s\"\n", join( " ", @command ) ) if ($debug);
+    while (<$run>) {
+        my $line = $_;
+        chomp $line;
+        if ($match) {
+            if ( $line =~ $match ) {
+                push( @matching_lines, $line );
+            }
+        }
+        else {
+            push( @output_lines, $line );
+        }
+    }
+    close($run) || do {
+        print("[debug] Command returns non-zero code\n") if ($debug);
+        push( @messages,
+            sprintf( "Unexpected exit status from command: %s", $? >> 8 ) );
+        $exitstatus = 'UNKNOWN';
+        printstatus( { exitstatus => $exitstatus, messages => \@messages } );
+        exit( $STATUSCODE{$exitstatus} );
+    }
+}
+else {
+    print("[debug] Command did not execute\n") if ($debug);
+    push( @messages, "Unable to execute command" );
+    $exitstatus = 'UNKNOWN';
+    printstatus( { exitstatus => $exitstatus, messages => \@messages } );
+    exit( $STATUSCODE{$exitstatus} );
+}
+
+print("[debug] Command returns zero return code\n") if ($debug);
+
+# Evaluate result
+my $statusline;
+my $status_critical   = 0;
+my $status_warning    = 0;
+my $number_of_matches = scalar(@matching_lines);
+
+if ( defined($match) ) {
+    print("[debug] Got --match parameter\n");
+
+    if ( defined($critical) ) {
+        print("[debug] got --critical range\n");
+        if (!Range::value_within_range(
+                {   range => $critical,
+                    value => $number_of_matches,
+                    name  => 'critical',
+                }
+            )
+            )
+        {
+            $status_critical = 1;
+        }
+    }
+    if ( defined($warning) ) {
+        print("[debug] got --warning range\n");
+        if ( !$status_critical ) {
+            if (!Range::value_within_range(
+                    {   range => $warning,
+                        value => $number_of_matches,
+                        name  => 'warning',
+                    }
+                )
+                )
+            {
+                $status_warning = 1;
+            }
+        }
+    }
+
+    if ($status_critical) {
+        print("[debug] value outside critical thresholds\n");
+        $statusline
+            = sprintf( 'Got %s matching lines, outside threshold "%s"',
+            $number_of_matches, $critical );
+        $exitstatus = 'CRITICAL';
+    }
+    elsif ($status_warning) {
+        print("[debug] value outside warning thresholds\n");
+        $statusline
+            = sprintf( 'Got %s matching lines, outside threshold "%s"',
+            $number_of_matches, $warning );
+        $exitstatus = 'WARNING';
+    }
+    else {
+        print("[debug] value within thresholds\n");
+        my @status = ();
+        push @status, sprintf( 'Got %s matching lines', $number_of_matches );
+        push @status, sprintf( 'critical threshold: "%s"', $critical )
+            if ( defined($critical) );
+        push @status, sprintf( 'warning threshold: "%s"', $warning )
+            if ( defined($warning) );
+        $statusline = join( ", ", @status );
+        $exitstatus = 'OK';
+    }
+
+    push @messages, $statusline;
+    push( @messages, @matching_lines ) if ($verbose);
+
+    push @perfdata, sprintf( "matches=%s", scalar(@matching_lines) );
+
+}
+else {
+    print("[debug] No --match parameter\n");
+    $statusline = 'Command executed OK';
+    $exitstatus = 'OK';
+
+    push @messages, $statusline;
+    push( @messages, @output_lines ) if ($verbose);
+}
+
+# The end
+printstatus(
+    {   exitstatus => $exitstatus,
+        messages   => \@messages,
+        perfdata   => \@perfdata
+    }
+);
+exit( $STATUSCODE{$exitstatus} );
+
+##############################
+# Range
+#
+# Functionality for validating and checking against range parameters.
+package Range;
+
+sub check_format {
+    my $range = shift;
+    return (
+        $range =~ m{
+                            ^                     # beginning of string
+                            @?                    # inversion of range, if present
+                            (
+                                (~|-?\d+):        # above $1
+                            |
+                                :?(\d+)           # between 0 and $1
+                            |
+                                (~|-?\d+):(-?\d+) # between $1 and $2
+                            )
+                            $                     # end of string
+                    }x
+    );
+}
+
+sub value_within_range {
+    my ($arg_ref) = @_;
+    my $range     = $arg_ref->{range};
+    my $value     = $arg_ref->{value};
+    my $name      = $arg_ref->{name};
+    my $min;
+    my $max;
+    my $inversion;
+    my $result;
+
+    # Check parameters
+    confess("[bug] Missing range") unless ( defined $range );
+    confess("[bug] Missing value") unless ( defined $value );
+    confess("[bug] Missing name")  unless ( defined $name );
+
+    # Check for inversion, remove "@"
+    if ( $range =~ /^@(.*)/ ) {
+        $inversion = 1;
+        $range     = $1;
+    }
+
+    # example: "10", outside { 0 .. 10 }
+    if ( $range =~ /^(\d+)$/ ) {
+        $min    = 0;
+        $max    = $1;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "10:", outside { 10 .. inf }
+    elsif ( $range =~ /^(-?\d+):$/ ) {
+        $min    = $1;
+        $result = ( $min <= $value );
+    }
+
+    # example: ~:10, outside { -inf .. 10 }
+    elsif ( $range =~ /^~:(-?\d+)$/ ) {
+        $max    = $1;
+        $result = ( $value <= $max );
+    }
+
+    # example: 1:10, -10:-1, -10:10
+    elsif ( $range =~ /^(-?\d+):(-?\d+)$/ ) {
+        $min    = $1;
+        $max    = $2;
+        $result = ( $min <= $value && $value <= $max );
+    }
+
+    # example: "~:", outside { -inf .. inf }
+    # - makes little sense, but it is valid syntax
+    elsif ( $range =~ /^~:$/ ) {
+        $result = 1;
+    }
+
+    # Safety belt
+    else {
+        die(sprintf(
+                "Invalid %s range format. Can not parse %s.\n",
+                $name, $range
+            )
+        );
+    }
+
+    if ( defined($min) and defined($max) ) {
+        if ( $min > $max ) {
+            die(sprintf(
+                    "Invalid %s range value. Minimum (%s) must not be higher than maximum (%s)\n",
+                    $name, $range, $min, $max
+                )
+            );
+        }
+    }
+    $result = ( $result xor $inversion );
+    return $result;
+}
+
+__END__
+
+=head1 NAME
+
+check_command - Check exit code and output of command
+
+=head1 SYNOPSIS
+
+check_command [options] -- <COMMAND> [COMMAND OPTIONS]
+
+Options:
+
+ [-h | --help]                 - short help
+ [-m | --man ]                 - full documentation
+ [-M | --match <REGEX>]        - match command output
+ [-w | --warning <THRESHOLD>]  - match threshold for warning exit status
+ [-c | --critical <THRESHOLD>] - match threshold for critical exit status
+ [-v | --verbose]              - show verbose output
+ [-d | --debug]                - show debug messages
+
+Arguments:
+
+Everything after "--" is the command to run, with all options and
+arguments for that command.
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-M|--match REGEX>
+
+Look for lines from the command output matching the regular expression
+provided. The number of matching lines is compared to the warning and
+critical thresholds.
+
+=item B<-w|--warning THRESHOLD>
+
+Exit with CRITICAL severity if the value matches the threshold. See
+THRESHOLDS for values.
+
+Default value is unset, meaning that any value is ok.
+
+=item B<-c|--critical THRESHOLD>
+
+Exit with CRITICAL severity if the value matches the threshold. See
+THRESHOLDS for values.
+
+Default value is "1", meaning at least one matching line must be
+present.
+
+=item B<-d|--debug>
+
+Debug plugin state while running.
+
+=item B<-v|--verbose>
+
+Add extra information about matching processes to status output.
+
+=item B<-h|--help>
+
+Print brief help message and exit.
+
+=item B<-m|--man>
+
+Print manual page and exit.
+
+=back
+
+=head1 DESCRIPTION
+
+B<check_command> will execute a commandline, and expect it to return
+with a non-error return code. The output of the command can be
+matched, and the number of matches can be specified with warning and
+critical thresholds.
+
+If the command runs, and exits with a zero return code, and optionally
+contains the expected output, the plugin will exit with status 0 (OK),
+otherwise it will exit with status 1(WARNING) or 2 (CRITICAL).
+
+If the command runs, and exits with a non-zero return code, the plugin
+will exit with status 2 (CRITICAL).
+
+If the command does not run, it will exit with status 3 (UNKNOWN).
+
+=head1 THRESHOLDS
+
+A threshold is a range with an alert level (either warning or
+critical).  The general format for ranges is:
+
+=over 4
+
+C<[@]start:end>
+
+=back
+
+C<start> must be lower than C<end>.
+
+C<start> and C<:> is not required if start is 0.
+
+If range is of format C<start:> and end is not specified, end is
+infinity.
+
+Negative infinity is specified as C<~>.
+
+=head2 EXAMPLE THRESHOLDS
+
+Generate alert for range if value is...
+
+=over 4
+
+=item B<10>
+
+Outside the range of C<{0 .. 10}>
+
+=item B<10:>
+
+Outside the range of C<{10 .. infinity}>
+
+=item B<~:10>
+
+Outside the range of C<{-infinity .. 10}>
+
+=item B<10:20>
+
+Outside the range of C<{10 .. 20}>
+
+=item B<@10:20>
+
+Inside the range of C<{10 .. 20}>
+
+=back
+
+=head1 EXAMPLES
+
+=over 4
+
+=item B<check_command -- /bin/true>
+
+Run the command C</bin/true>, and expect it to return without error.
+Do not care about output.
+
+This will always exit with status OK, since C</bin/true> always
+returns with a zero exit code.
+
+=item B<check_command -- /bin/false>
+
+Run the command C</bin/false>, and expect it to return without error.
+Do not care about output.
+
+This will always exit with status CRITICAL, since C</bin/false> always
+returns with a non-zero exit code.
+
+=item B<check_command --match ssh -- ls -l /tmp>
+
+Run the command C<ls -l /tmp>, and expect it to return without error.
+It expects the output to contain at least one line matching the
+regular expression C<ssh>.
+
+=item B<check_command --match something --warning 5: --critical 10: -- print-status --foo>
+
+Run the command C<print-status --foo>, and expect it to return without
+error. If the output contains more than five lines matching
+C<something>, it will exit with B<WARNING>, and if more than ten lines
+match, it will exit with B<CRITICAL>.
+
+=back
+
+=cut
