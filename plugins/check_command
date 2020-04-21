@@ -195,7 +195,7 @@ if ( defined($match) ) {
 
 }
 else {
-    print("[debug] No --match parameter\n");
+    print("[debug] No --match parameter\n") if ($debug);
     $statusline = 'Command executed OK';
     $exitstatus = 'OK';
 
