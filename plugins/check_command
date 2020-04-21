@@ -89,7 +89,7 @@ if ( defined($match) and !defined($critical) and !defined($warning) ) {
 }
 
 # Run command, capture output
-$ENV{'LANG'} = 'c';
+$ENV{'LANG'} = 'C';
 my $pid = open( my $run, "-|", @command );
 if ($pid) {
     printf( "[debug] Command \"%s\"\n", join( " ", @command ) ) if ($debug);
