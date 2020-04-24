@@ -40,7 +40,7 @@ severity = 5
 
 [Variables::ProhibitPunctuationVars]
 severity = 5
-allow = $_ $! $0 $@ $$
+allow = $_ $! $0 $@ $$ $?
 
 [Variables::ProhibitUnusedVariables]
 severity = 5
