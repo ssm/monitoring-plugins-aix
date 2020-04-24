@@ -55,14 +55,12 @@ sub process_file {
                 {   command     => [ 'sh', '-n', $file ],
                     description => 'sh syntax check',
                     filename    => $filename,
-                }
-            );
+                } );
             run_check(
                 {   command     => [ 'shellcheck', $file ],
                     description => 'shellcheck',
                     filename    => $filename,
-                }
-            );
+                } );
         };
     }
     elsif ( $interpreter =~ m{/bin/ksh} ) {
@@ -70,14 +68,12 @@ sub process_file {
             {   command     => [ 'ksh', '-n', $file ],
                 description => 'ksh syntax check',
                 filename    => $filename,
-            }
-            );
+            } );
         run_check(
             {   command     => [ 'shellcheck', $file ],
                 description => 'shellcheck',
                 filename    => $filename,
-            }
-        );
+            } );
     }
     elsif ( $interpreter =~ m{perl} ) {
         my $command;
@@ -91,8 +87,7 @@ sub process_file {
             {   command     => $command,
                 description => 'perl syntax check',
                 filename    => $filename
-            }
-        );
+            } );
     }
     else {
         fail( $filename . " unknown interpreter " . $interpreter );
@@ -126,8 +121,7 @@ sub run_check {
                 "\nCommand: %s\n\nSTDOUT:\n\n%s\n\nSTDERR:\n\n%s\n\n",
                 join( " ", @{$check_command} ),
                 $stdout, $stderr
-            )
-        );
+            ) );
     }
 }
 
