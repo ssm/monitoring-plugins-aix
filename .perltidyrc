@@ -1,0 +1,25 @@
+# Base configuration
+--perl-best-practices
+
+# Make changes directly
+--nostandard-output
+--backup-and-modify-in-place
+--backup-file-extension=/    # This is a git repo, no need for a backup file
+
+# Write errors to stderr
+--standard-error-output
+
+# Tokens
+--opening-brace-always-on-right
+--opening-token-right
+--stack-closing-tokens
+--stack-opening-tokens
+
+# Blank Line Control
+--maximum-consecutive-blank-lines=2
+
+# Turn warnings into errors
+--warning-output
+
+# Check Syntax via perl -c -T
+--check-syntax

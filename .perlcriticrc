@@ -1,0 +1,46 @@
+# Configuration for perlcritic
+#
+
+# Verbosity
+verbose            = [%p] %m at %f line %l, near '%r'\n
+profile-strictness = quiet
+
+# Disabled policies
+
+[-BuiltinFunctions::RequireBlockGrep]
+[-BuiltinFunctions::RequireBlockMap]
+[-ErrorHandling::RequireUseOfExceptions]
+[-Modules::RequireVersionVar]
+
+# Policy configuration
+
+[CodeLayout::ProhibitQuotedWordLists]
+severity = 5
+
+[CodeLayout::ProhibitTrailingWhitespace]
+severity = 5
+
+[CodeLayout::RequireTidyCode]
+perltidyrc = perltidyrc
+
+[CodeLayout::RequireTrailingCommas]
+severity = 5
+
+[ControlStructures::ProhibitUnreachableCode]
+severity = 5
+
+[Documentation::RequirePackageMatchesPodName]
+severity = 5
+
+[Miscellanea::ProhibitUnrestrictedNoCritic]
+severity = 5
+
+[TestingAndDebugging::ProhibitNoWarnings]
+severity = 5
+
+[Variables::ProhibitPunctuationVars]
+severity = 5
+allow = $_ $! $0 $@ $$
+
+[Variables::ProhibitUnusedVariables]
+severity = 5
