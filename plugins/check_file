@@ -11,11 +11,10 @@ my %STATUSCODE = (
     'UNKNOWN'  => '3',
     'OK'       => '0',
     'WARNING'  => '1',
-    'CRITICAL' => '2'
+    'CRITICAL' => '2',
 );
 
-my ( $status, $idle, $usage, $verbose, $debug, $help, $man );
-my $args;
+my ( $status, $verbose, $debug, $help, $man );
 my $warning;
 my $critical;
 my $perfdata;

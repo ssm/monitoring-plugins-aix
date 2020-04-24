@@ -10,10 +10,10 @@ my %STATUSCODE = (
     'UNKNOWN'  => '3',
     'OK'       => '0',
     'WARNING'  => '1',
-    'CRITICAL' => '2'
+    'CRITICAL' => '2',
 );
 
-my ( $status, $idle, $usage, $debug, $verbose, $help, $man );
+my ( $debug, $verbose, $help, $man );
 my $match;
 my $warning;
 my $critical;
