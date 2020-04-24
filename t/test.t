@@ -83,11 +83,22 @@ sub process_file {
         else {
             $command = [ 'perl', '-cw', $file ];
         }
-        run_check(
-            {   command     => $command,
-                description => 'perl syntax check',
-                filename    => $filename
-            } );
+        subtest $filename => sub {
+            plan tests => 2;
+            run_check(
+                {   command     => $command,
+                    description => 'perl syntax check',
+                    filename    => $filename
+                } );
+            run_check(
+                {   command => [
+                        'perlcritic',       '--profile',
+                        '../.perlcriticrc', $file
+                    ],
+                    description => 'perlcritic',
+                    filename    => $filename,
+                } );
+        }
     }
     else {
         fail( $filename . " unknown interpreter " . $interpreter );
