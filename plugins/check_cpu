@@ -13,14 +13,14 @@ my %STATUSCODE = (
 );
 
 my ( $status, $usage, $debug, $help, $man );
-my $items = { idle => 15, system => 14, user => 13 };
+my $items = { idle => 15, system => 14, user => 13 }; # AIX vmstat field numbers
 my $warn  = 90;
 my $crit  = 99;
-my $count = 5;
 my $stats = {};
 my @perfdata;
 my $exitstatus;
 my $message;
+my @command = ( "/usr/bin/vmstat", "1",  "5" );
 
 $status = GetOptions(
     "debug|d", \$debug, "warn|w=s", \$warn, "crit|c=i", \$crit,
@@ -29,29 +29,42 @@ $status = GetOptions(
 pod2usage(1) if $help;
 pod2usage( -verbose => 2 ) if $man;
 
-open( my $vmstat, "-|", "/usr/bin/vmstat", "1",  "${count}" )
-    || return 1;
-while (<$vmstat>) {
-    my $line = $_;
-    $line =~ s/^\s+|\s+$//g;
+my $pid = open( my $run,  "-|",  @command );
+if ($pid) {
+    printf( "[debug] Command \"%s\"\n", join( " ", @command ) ) if ($debug);
+    while (<$run>) {
+        my $line = $_;
+        $line =~ s/^\s+|\s+$//g;
 
-    printf( "[debug] vmstat: %s\n", $line ) if ($debug);
+        printf( "[debug] vmstat: %s\n", $line ) if ($debug);
 
-    my @counters = split( /[\t \n]+/, $line );
+        my @counters = split( /[\t \n]+/, $line );
 
-    next unless @counters;
-    next unless $counters[0] =~ /\d+/;
+        next unless @counters;
+        next unless $counters[0] =~ /\d+/;
 
-    foreach my $item ( keys( %{$items} ) ) {
-        printf( "[debug] %s => %s\n", $item, $counters[ $items->{$item} ] )
-            if ($debug);
-        $stats->{$item}          ||= {};
-        $stats->{$item}->{count} ||= 0;
-        $stats->{$item}->{sum}   ||= 0;
-        $stats->{$item}->{count}++;
-        $stats->{$item}->{sum} += $counters[ $items->{$item} ];
+        foreach my $item ( keys( %{$items} ) ) {
+            printf( "[debug] %s => %s\n", $item, $counters[ $items->{$item} ] )
+                if ($debug);
+            $stats->{$item}          ||= {};
+            $stats->{$item}->{count} ||= 0;
+            $stats->{$item}->{sum}   ||= 0;
+            $stats->{$item}->{count}++;
+            $stats->{$item}->{sum} += $counters[ $items->{$item} ];
+        }
+    }
+    close($run) || do {
+        print("[debug] Command returns non-zero code\n") if ($debug);
+        printf( "UNKNOWN - Unexpected exit status from command: %s\n", $? >> 8 );
+    exit( $STATUSCODE{$exitstatus} );
     }
 }
+else {
+    print("[debug] Command did not execute\n") if ($debug);
+    printf( "UNKNOWN - Unable to execute command: %s\n", $? >> 8 );
+    exit( $STATUSCODE{$exitstatus} );
+}
+
 
 # Status output
 $usage = 100 - ( $stats->{idle}->{sum} / $stats->{idle}->{count} );
