@@ -21,6 +21,7 @@ my $perfdata;
 my $exitstatus;
 my $filename;
 my $pattern;
+my $mtime;
 my $exclude_pattern;
 my $statefile;
 my ( $state_inode, $state_offset );
@@ -35,6 +36,7 @@ $status = GetOptions(
     "exclude|x=s"   => \$exclude_pattern,
     "warning|w=s"   => \&handle_threshold,
     "critical|c=s"  => \&handle_threshold,
+    "mtime|M"       => \$mtime,
     "statefile|s=s" => \$statefile,
     "debug|d"       => \$debug,
     "verbose|v"     => \$verbose,
@@ -355,16 +357,18 @@ check_file - Check file for matching lines
 check_file [options]
 
 Options:
+
  <-f <FILE>
- <-p REGEX>
- [-x <REGEX> ]
- [-w <THRESHOLD>]
- [-c <THRESHOLD>]
- [-s <FILE>]
- [-v]
- [-d]
- [-h]
- [-m]
+ <--pattern | -p REGEX>        Check file content matching REGEX
+ [--exclude | -x <REGEX> ]     Check file content excluding REGEX
+ [ --mtime | -M ]              Check file modification time
+ [--warning | -w <THRESHOLD>]  Warning threshold for content matches or mtime
+ [--critical | -c <THRESHOLD>] Critical threshold for content matches or mtime
+ [--statefile | -s <FILE>]     Statefile for reading file content since last run
+ [-v]                          Show verbose output
+ [-d]                          Show debugging messages
+ [-h]                          Show brief help
+ [-m]                          Show full documentation
 
 =head1 OPTIONS
 
@@ -372,9 +376,11 @@ Options:
 
 =item B<-f|--file FILE>
 
-Look for matching lines in FILE.
+Inspect the file FILE.
 
-Without any other options, it will [...]
+Without any other options, it will check that the file exists. Use
+B<--pattern> or B<--mtime> to inspect file content or modification
+time.
 
 If the file does not exist, it will exit with UNKNOWN status.
 
@@ -386,15 +392,50 @@ Look for lines matching the regular expression.
 
 Exclude lines matching the regular expression.
 
+=item B<-m|--mtime>
+
+Look at file modification time. This will use the --warning and
+--critical thresholds to match the age of the file, instead of the
+number of matching lines.
+
+Using B<--mtime> will ignore the B<--pattern> and B<--exclude>
+parameters.
+
 =item B<-c|--critical THRESHOLD>
 
+=over 4
+
+=item content matching
+
 Exit with CRITICAL severity if the number of lines does not match the
-threshold.  See THRESHOLDS in the manual page for values.
+threshold.
+
+=item file modification time matching
+
+Exit with CRITICAL severity if the time since file modification is
+outside the threshold.
+
+=back
+
+See THRESHOLDS in the manual page for values.
 
 =item B<-c|--warning THRESHOLD>
 
+=over 4
+
+=item content matching
+
 Exit with WARNING severity if the number of lines does not match the
-threshold.  See THRESHOLDS in the manual page for values.
+threshold.
+
+=item file modification time matching
+
+Exit with WARNING severity if the time since file modification is
+outside the threshold.
+
+=back
+
+See THRESHOLDS in the manual page for values.
 
 =item B<-s|--statefile STATEFILE>
 
