@@ -47,7 +47,11 @@ sub printstatus {
     my $messages   = $arg_ref->{messages};
     my $perfdata   = $arg_ref->{perfdata};
     my @messages   = @{$messages};
-    my @perfdata   = @{$perfdata};
+
+    my @perfdata;
+    if (defined($perfdata)) {
+        @perfdata   = @{$perfdata};
+    }
 
     # Check parameters
     confess("[bug] Missing exitstatus") unless ( defined $exitstatus );
