@@ -21,6 +21,7 @@ my $perfdata;
 my $exitstatus;
 my $filename;
 my $pattern;
+my $mtime;
 my $exclude_pattern;
 my $statefile;
 my ( $state_inode, $state_offset );
@@ -35,141 +36,283 @@ $status = GetOptions(
     "exclude|x=s"   => \$exclude_pattern,
     "warning|w=s"   => \&handle_threshold,
     "critical|c=s"  => \&handle_threshold,
+    "mtime|M"       => \$mtime,
     "statefile|s=s" => \$statefile,
     "debug|d"       => \$debug,
     "verbose|v"     => \$verbose,
     "help|h"        => \$help,
     "man|m"         => \$man
 ) or pod2usage(3);
-pod2usage(1) if $help;
+pod2usage(1)               if $help;
 pod2usage( -verbose => 2 ) if $man;
 
 # Sanity checks
 if ( !defined($filename) ) {
     pod2usage(
-        {
-            -message => "Error: please specify file name",
+        {   -message => "Error: please specify file name",
             -exitval => $STATUSCODE{'UNKNOWN'},
-        }
-    );
+        } );
 }
-if ( !defined($pattern) ) {
-    pod2usage(
-        {
-            -message => "Error: please specify pattern",
-            -exitval => $STATUSCODE{'UNKNOWN'},
-        }
-    );
+if ( defined($mtime) ) {
+    if ( !defined($critical) and !defined($warning) ) {
+        pod2usage(
+            {   -message => "Error: --mtime needs --critical or --warning",
+                -exitval => $STATUSCODE{'UNKNOWN'},
+            } );
+    }
+    if ( defined($pattern) ) {
+        pod2usage(
+            {   -message => "Error: --mtime can not be used with --pattern",
+                -exitval => $STATUSCODE{'UNKNOWN'},
+            } );
+    }
+}
+
+if ( defined($critical) or defined($warning) ) {
+    if ( !defined($mtime) and !defined($pattern) ) {
+        pod2usage(
+            {   -message =>
+                    "Error: --critical and --warning needs --pattern or --mtime",
+                -exitval => $STATUSCODE{'UNKNOWN'},
+            } );
+    }
 }
 
 ##############################
-# Gather
-open my $FILE, '<', $filename
-    or croak "Can't open '${filename}': ${OS_ERROR}";
+# Check for mtime, content or existense
 
-my @file_stat  = stat($FILE);
-my $file_inode = $file_stat[1];
-my $file_size  = $file_stat[7];
-
-if ($statefile) {
-    ( $state_inode, $state_offset ) = read_state( { statefile => $statefile } );
-
-    # Check if file is the same as last time
-    if ( defined($state_inode) && $state_inode == $file_inode ) {
-
-        # Check if file has been truncated
-        if ( $state_offset > $file_size ) {
-            $state_offset = 0;
-        }
-        else {
-            seek( $FILE, $state_offset, 0 );
-        }
-    }
-    else {
-        # New file or new statefile
-        $state_inode  = $file_inode;
-        $state_offset = 0;
-    }
+if ($mtime) {
+    debug("checking file modification time");
+    check_file_mtime();
 }
-
-while (<$FILE>) {
-    my $line = $_;
-    chomp($line);
-    $state_offset = tell($FILE) if ($statefile);
-    if ( $pattern && /$pattern/ ) {
-        if ($exclude_pattern) {
-            push( @matches, $line ) unless /$exclude_pattern/;
-        }
-        else {
-            push @matches, $line;
-        }
-    }
-}
-close($FILE);
-write_state( { statefile => $statefile, inode => $state_inode, offset => $state_offset } ) if ($statefile);
-
-##############################
-# Evaluate
-my $match_counter = scalar(@matches);
-if ( $critical || $warning ) {
-    if (
-        $critical
-        && !value_within_range(
-            {
-                name  => 'critical',
-                range => $critical,
-                value => $match_counter
-            }
-        )
-        )
-    {
-        $exitstatus = 'CRITICAL';
-        push @messages, sprintf( '%s matching lines. Critical threshold "%s"', $match_counter, $critical );
-    }
-    elsif ( $warning
-        && !value_within_range( { name => 'warning', range => $warning, value => $match_counter } ) )
-    {
-        $exitstatus = 'WARNING';
-        push @messages, sprintf( '%s matching lines. Warning threshold "%s"', $match_counter, $warning );
-    }
-    else {
-        $exitstatus = 'OK';
-        push @messages, sprintf( '%s matching lines.', $match_counter );
-    }
-    push @perfdata,
-        sprintf( "lines=%s;%s;%s",
-        $match_counter,
-        defined($warning)  ? $warning  : '',
-        defined($critical) ? $critical : '' );
-}
-elsif (@matches) {
-    $exitstatus = 'OK';
-    push @messages, sprintf( "%d matching lines found", $match_counter );
-    push @perfdata, sprintf( "lines=%s", $match_counter );
+elsif ($pattern) {
+    debug("checking file content");
+    check_file_content();
 }
 else {
-    $exitstatus = 'CRITICAL';
-    push @messages, "No matching lines found";
+    debug("checking file existence");
+    check_file_existence();
 }
 
-if ($verbose) {
-    push @messages, @matches;
-}
-
-# The end
-printstatus(
-    {
-        exitstatus => $exitstatus,
-        messages   => \@messages,
-        perfdata   => \@perfdata
-    }
-);
-exit( $STATUSCODE{$exitstatus} );
-
+##############################
 # Functions
+
+sub debug {
+    my $message = shift;
+
+    printf( "[debug] %s\n", $message ) if ($debug);
+}
+
+sub check_file_mtime {
+    if ( my @file_stat = stat($filename) ) {
+        my $file_mtime = $file_stat[9];
+        my $file_age   = time - $file_mtime;
+        my $exitstatus = 'OK';
+        my $message    = sprintf( 'File %s within threshold', $filename );
+        my $perfdata;
+
+        debug(
+            sprintf( "file age for %s is %s seconds", $filename, $file_age )
+        );
+
+        $perfdata = sprintf( "age=%ss;%s;%s",
+            $file_age,
+            defined($warning)  ? $warning  : '',
+            defined($critical) ? $critical : '' );
+
+        if ($critical) {
+            debug(
+                sprintf( 'comparing file age to critical threshold %s',
+                    $critical ) );
+            if (!value_within_range(
+                    {   name  => 'critical',
+                        range => $critical,
+                        value => $file_age,
+                    } )
+            ) {
+                $exitstatus = 'CRITICAL';
+                $message
+                    = sprintf(
+                    "File age is %s seconds, outside critical threshold %s",
+                    $file_age, $critical );
+            }
+        }
+        if ( $warning and $exitstatus ne 'CRITICAL' ) {
+            debug(
+                sprintf( 'comparing file age to warning threshold %s',
+                    $warning ) );
+            if (!value_within_range(
+                    {   name  => 'warning',
+                        range => $warning,
+                        value => $file_age,
+                    } )
+            ) {
+                $exitstatus = 'WARNING';
+                $message
+                    = sprintf( "File age is %s, outside warning threshold %s",
+                    $file_age, $warning );
+            }
+        }
+
+        printstatus(
+            {   exitstatus => $exitstatus,
+                messages   => [$message],
+                perfdata   => [$perfdata],
+            } );
+        exit( $STATUSCODE{$exitstatus} );
+
+    }
+    else {
+        printstatus(
+            {   exitstatus => 'UNKNOWN',
+                messages   => ["Unable to find file"],
+            } );
+        exit( $STATUSCODE{'UNKNOWN'} );
+    }
+}
+
+sub check_file_existence {
+    if ( stat($filename) ) {
+        debug("file exists");
+        printstatus(
+            {   exitstatus => 'OK',
+                messages   => ["File exists"],
+            } );
+        exit( $STATUSCODE{'OK'} );
+    }
+    else {
+        debug("file does not exist");
+        printstatus(
+            {   exitstatus => 'CRITICAL',
+                messages   => ["File does not exist"],
+            } );
+        exit( $STATUSCODE{'OK'} );
+    }
+}
+
+sub check_file_content {
+    open my $FILE, '<', $filename
+        or croak "Can't open '${filename}': ${OS_ERROR}";
+
+    my @file_stat  = stat($FILE);
+    my $file_inode = $file_stat[1];
+    my $file_size  = $file_stat[7];
+
+    if ($statefile) {
+        ( $state_inode, $state_offset )
+            = read_state( { statefile => $statefile } );
+
+        # Check if file is the same as last time
+        if ( defined($state_inode) && $state_inode == $file_inode ) {
+
+            # Check if file has been truncated
+            if ( $state_offset > $file_size ) {
+                $state_offset = 0;
+            }
+            else {
+                seek( $FILE, $state_offset, 0 );
+            }
+        }
+        else {
+            # New file or new statefile
+            $state_inode  = $file_inode;
+            $state_offset = 0;
+        }
+    }
+
+    while (<$FILE>) {
+        my $line = $_;
+        chomp($line);
+        $state_offset = tell($FILE) if ($statefile);
+        if ( $pattern && /$pattern/ ) {
+            if ($exclude_pattern) {
+                push( @matches, $line ) unless /$exclude_pattern/;
+            }
+            else {
+                push @matches, $line;
+            }
+        }
+    }
+
+    if ($statefile) {
+        write_state(
+            {   statefile => $statefile,
+                inode     => $state_inode,
+                offset    => $state_offset
+            } );
+    }
+    close($FILE);
+
+    evaluate_file_content( \@matches );
+}
+
+sub evaluate_file_content {
+    my $matches_ref = shift;
+    my @matches     = @{$matches_ref};
+
+    my $match_counter = scalar(@matches);
+    if ( $critical || $warning ) {
+        if ($critical
+            && !value_within_range(
+                {   name  => 'critical',
+                    range => $critical,
+                    value => $match_counter
+                } )
+        ) {
+            $exitstatus = 'CRITICAL';
+            push @messages,
+                sprintf( '%s matching lines. Critical threshold "%s"',
+                $match_counter, $critical );
+        }
+        elsif (
+            $warning
+            && !value_within_range(
+                {   name  => 'warning',
+                    range => $warning,
+                    value => $match_counter
+                } )
+        ) {
+            $exitstatus = 'WARNING';
+            push @messages,
+                sprintf( '%s matching lines. Warning threshold "%s"',
+                $match_counter, $warning );
+        }
+        else {
+            $exitstatus = 'OK';
+            push @messages, sprintf( '%s matching lines.', $match_counter );
+        }
+        push @perfdata,
+            sprintf( "lines=%s;%s;%s",
+            $match_counter,
+            defined($warning)  ? $warning  : '',
+            defined($critical) ? $critical : '' );
+    }
+    elsif (@matches) {
+        $exitstatus = 'OK';
+        push @messages, sprintf( "%d matching lines found", $match_counter );
+        push @perfdata, sprintf( "lines=%s",                $match_counter );
+    }
+    else {
+        $exitstatus = 'CRITICAL';
+        push @messages, "No matching lines found";
+    }
+
+    if ($verbose) {
+        push @messages, @matches;
+    }
+
+    printstatus(
+        {   exitstatus => $exitstatus,
+            messages   => \@messages,
+            perfdata   => \@perfdata,
+        } );
+    exit( $STATUSCODE{$exitstatus} );
+}
+
 sub handle_threshold {
     my ( $threshold_name, $threshold_value ) = @_;
-    printf( "[debug] Checking %s threshold range %s\n", $threshold_name, $threshold_value )
+    printf( "[debug] Checking %s threshold range %s\n",
+        $threshold_name, $threshold_value )
         if ($debug);
     if ( check_range_format($threshold_value) ) {
         if ( $threshold_name eq "warning" ) {
@@ -183,7 +326,8 @@ sub handle_threshold {
         }
     }
     else {
-        my $message = sprintf( "Invalid range %s for %s\n", $threshold_name, $threshold_value );
+        my $message = sprintf( "Invalid range %s for %s\n",
+            $threshold_name, $threshold_value );
         die($message);
     }
 }
@@ -195,7 +339,10 @@ sub read_state {
     my $offset;
 
     if ( -f $statefile ) {
-        open( my $in, '<', $statefile ) or die( sprintf( "[error] Unable to read from statefile %s", $statefile ) );
+        open( my $in, '<', $statefile )
+            or die(
+            sprintf( "[error] Unable to read from statefile %s", $statefile )
+            );
         while (<$in>) {
             chomp;
             if (/^inode=(\d+)/) {
@@ -204,7 +351,8 @@ sub read_state {
             }
             if (/^offset=(\d+)/) {
                 $offset = $1;
-                printf( "[debug] Read state offset=%s\n", $offset ) if ($debug);
+                printf( "[debug] Read state offset=%s\n", $offset )
+                    if ($debug);
             }
         }
         close $in;
@@ -225,11 +373,18 @@ sub write_state {
     my $offset    = $arg_ref->{offset};
 
     if ( -l $statefile ) {
-        die( sprintf("[error] Statefile %s is a symbolic link, not touching that.\n"), $statefile );
+        die(sprintf(
+                "[error] Statefile %s is a symbolic link, not touching that.\n"
+            ),
+            $statefile
+        );
     }
 
-    printf( "[debug] Write state inode=%s, offset=%s\n", $inode, $offset ) if ($debug);
-    open( my $out, '>', $statefile ) or die( sprintf( "[error] Unable to write to statefile %s", $statefile ) );
+    printf( "[debug] Write state inode=%s, offset=%s\n", $inode, $offset )
+        if ($debug);
+    open( my $out, '>', $statefile )
+        or die(
+        sprintf( "[error] Unable to write to statefile %s", $statefile ) );
     printf $out "inode=%s\n",  $inode;
     printf $out "offset=%s\n", $offset;
     close $out;
@@ -241,7 +396,15 @@ sub printstatus {
     my $messages   = $arg_ref->{messages};
     my $perfdata   = $arg_ref->{perfdata};
     my @messages   = @{$messages};
-    my @perfdata   = @{$perfdata};
+
+    my @perfdata;
+    if ( defined($perfdata) ) {
+        @perfdata = @{$perfdata};
+    }
+
+    # Check parameters
+    confess("[bug] Missing exitstatus") unless ( defined $exitstatus );
+    confess("[bug] Missing messages")   unless ( defined $messages );
 
     # First line of status
     printf( "%s - %s", $exitstatus, shift @messages );
@@ -329,15 +492,21 @@ sub value_within_range {
 
     # Safety belt
     else {
-        my $message = sprintf( "Invalid %s range format. Can not parse %s.\n", $name, $range );
-        pod2usage( { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
+        my $message = sprintf( "Invalid %s range format. Can not parse %s.\n",
+            $name, $range );
+        pod2usage(
+            { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
     }
 
     if ( defined($min) and defined($max) ) {
         if ( $min > $max ) {
-            my $message = sprintf( "Invalid %s range value. Minimum (%s) must not be higher than maximum (%s)\n",
+            my $message
+                = sprintf(
+                "Invalid %s range value. Minimum (%s) must not be higher than maximum (%s)\n",
                 $name, $range, $min, $max );
-            pod2usage( { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} } );
+            pod2usage(
+                { -message => $message, -exitval => $STATUSCODE{'UNKNOWN'} }
+            );
         }
     }
     $result = ( $result xor $inversion );
@@ -355,16 +524,18 @@ check_file - Check file for matching lines
 check_file [options]
 
 Options:
+
  <-f <FILE>
- <-p REGEX>
- [-x <REGEX> ]
- [-w <THRESHOLD>]
- [-c <THRESHOLD>]
- [-s <FILE>]
- [-v]
- [-d]
- [-h]
- [-m]
+ <--pattern | -p REGEX>        Check file content matching REGEX
+ [--exclude | -x <REGEX> ]     Check file content excluding REGEX
+ [ --mtime | -M ]              Check file modification time
+ [--warning | -w <THRESHOLD>]  Warning threshold for content matches or mtime
+ [--critical | -c <THRESHOLD>] Critical threshold for content matches or mtime
+ [--statefile | -s <FILE>]     Statefile for reading file content since last run
+ [-v]                          Show verbose output
+ [-d]                          Show debugging messages
+ [-h]                          Show brief help
+ [-m]                          Show full documentation
 
 =head1 OPTIONS
 
@@ -372,9 +543,11 @@ Options:
 
 =item B<-f|--file FILE>
 
-Look for matching lines in FILE.
+Inspect the file FILE.
 
-Without any other options, it will [...]
+Without any other options, it will check that the file exists. Use
+B<--pattern> or B<--mtime> to inspect file content or modification
+time.
 
 If the file does not exist, it will exit with UNKNOWN status.
 
@@ -386,15 +559,50 @@ Look for lines matching the regular expression.
 
 Exclude lines matching the regular expression.
 
+=item B<-m|--mtime>
+
+Look at file modification time. This will use the --warning and
+--critical thresholds to match the age of the file, instead of the
+number of matching lines.
+
+Using B<--mtime> will ignore the B<--pattern> and B<--exclude>
+parameters.
+
 =item B<-c|--critical THRESHOLD>
 
+=over 4
+
+=item content matching
+
 Exit with CRITICAL severity if the number of lines does not match the
-threshold.  See THRESHOLDS in the manual page for values.
+threshold.
+
+=item file modification time matching
+
+Exit with CRITICAL severity if the time since file modification is
+outside the threshold.
+
+=back
+
+See THRESHOLDS in the manual page for values.
 
 =item B<-c|--warning THRESHOLD>
 
+=over 4
+
+=item content matching
+
 Exit with WARNING severity if the number of lines does not match the
-threshold.  See THRESHOLDS in the manual page for values.
+threshold.
+
+=item file modification time matching
+
+Exit with WARNING severity if the time since file modification is
+outside the threshold.
+
+=back
+
+See THRESHOLDS in the manual page for values.
 
 =item B<-s|--statefile STATEFILE>
 
