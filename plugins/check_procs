@@ -203,6 +203,7 @@ elsif (@processes) {
 else {
     $exitstatus = 'CRITICAL';
     push @messages, "No matching processes found";
+    push @perfdata, sprintf( "processes=%s", $process_count );
 }
 
 if ($verbose) {
